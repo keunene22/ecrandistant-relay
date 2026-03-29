@@ -8,6 +8,7 @@ Usage:
 import asyncio
 import argparse
 import logging
+import os
 
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
@@ -15,7 +16,9 @@ logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 def main():
     parser = argparse.ArgumentParser(description='EcranDistant relay server')
     parser.add_argument('--host', default='0.0.0.0', help='Bind address (default: 0.0.0.0)')
-    parser.add_argument('--port', type=int, default=9000, help='Port (default: 9000)')
+    parser.add_argument('--port', type=int,
+                        default=int(os.environ.get('PORT', 9000)),
+                        help='Port (default: env PORT or 9000)')
     args = parser.parse_args()
 
     print()
