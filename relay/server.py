@@ -12,6 +12,7 @@ import json
 import logging
 import secrets
 import string
+from http import HTTPStatus
 
 import websockets
 import websockets.exceptions
@@ -126,7 +127,13 @@ async def _client_session(ws, session_id: str):
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+async def _health(connection, request):
+    """Answer Render's HTTP health-check probes without breaking WebSocket."""
+    if request.path in ('/', '/health'):
+        return connection.respond(HTTPStatus.OK, "Relay OK\n")
+
+
 async def start(host: str = '0.0.0.0', port: int = 9000):
-    async with websockets.serve(_handler, host, port):
+    async with websockets.serve(_handler, host, port, process_request=_health):
         logger.info('Relay server running on %s:%d', host, port)
         await asyncio.Future()  # run forever
