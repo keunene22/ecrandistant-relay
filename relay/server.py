@@ -1,22 +1,22 @@
 """
-Relay server — runs on a machine with a public IP.
+Relay server — aiohttp, handles HTTP health checks + WebSocket relay.
 
-Both host and client connect here via WebSocket; the relay pairs them by
-session ID and forwards raw bytes between them without inspecting content.
-
-Uses aiohttp so that Render's HTTP health-check (HEAD /) also works.
+Architecture:
+- _host_session  : drives the full bidirectional relay via asyncio tasks
+- _client_session: just registers the client WS and waits for session end
 """
 import asyncio
 import json
 import logging
 import secrets
 import string
+from http import HTTPStatus
 
 from aiohttp import web, WSMsgType
 
 logger = logging.getLogger(__name__)
 
-# {session_id: {'host': ws, 'client_holder': [ws|None], 'client_joined': Event}}
+# session: {'host': ws, 'client_holder': [ws|None], 'client_joined': Event, 'done': Event}
 _sessions: dict = {}
 
 
@@ -28,23 +28,36 @@ def _new_session_id(length: int = 6) -> str:
             return sid
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
 async def _send_json(ws, data: dict):
     await ws.send_str(json.dumps(data))
 
 
-# ── Host side ──────────────────────────────────────────────────────────────────
+# ── Bidirectional forwarder ────────────────────────────────────────────────────
+
+async def _forward(src_ws, dst_ws):
+    """Forward all messages from src to dst until one side closes."""
+    async for msg in src_ws:
+        if msg.type == WSMsgType.BINARY:
+            await dst_ws.send_bytes(msg.data)
+        elif msg.type == WSMsgType.TEXT:
+            await dst_ws.send_str(msg.data)
+        elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
+            break
+
+
+# ── Host handler ───────────────────────────────────────────────────────────────
 
 async def _host_session(ws):
-    session_id = _new_session_id()
+    session_id    = _new_session_id()
     client_holder = [None]
     client_joined = asyncio.Event()
+    session_done  = asyncio.Event()
 
     _sessions[session_id] = {
-        'host': ws,
+        'host':          ws,
         'client_holder': client_holder,
         'client_joined': client_joined,
+        'done':          session_done,
     }
     logger.info('[%s] Host registered', session_id)
 
@@ -59,28 +72,29 @@ async def _host_session(ws):
 
         client_ws = client_holder[0]
         await _send_json(ws, {'type': 'peer_connected'})
-        logger.info('[%s] Client paired, relaying…', session_id)
+        logger.info('[%s] Relay started', session_id)
 
-        async for msg in ws:
-            if msg.type == WSMsgType.TEXT:
-                try:
-                    await client_ws.send_str(msg.data)
-                except Exception:
-                    break
-            elif msg.type == WSMsgType.BINARY:
-                try:
-                    await client_ws.send_bytes(msg.data)
-                except Exception:
-                    break
-            elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
-                break
+        # Launch both directions as concurrent tasks
+        t1 = asyncio.create_task(_forward(ws,        client_ws))  # host → client
+        t2 = asyncio.create_task(_forward(client_ws, ws))         # client → host
 
+        # Stop as soon as one side disconnects
+        done, pending = await asyncio.wait(
+            [t1, t2], return_when=asyncio.FIRST_COMPLETED
+        )
+        for t in pending:
+            t.cancel()
+
+        logger.info('[%s] Relay ended', session_id)
+
+    except Exception as e:
+        logger.warning('[%s] Host session error: %s', session_id, e)
     finally:
+        session_done.set()
         _sessions.pop(session_id, None)
-        logger.info('[%s] Session closed', session_id)
 
 
-# ── Client side ────────────────────────────────────────────────────────────────
+# ── Client handler ────────────────────────────────────────────────────────────
 
 async def _client_session(ws, session_id: str):
     if not session_id or session_id not in _sessions:
@@ -98,43 +112,29 @@ async def _client_session(ws, session_id: str):
     await _send_json(ws, {'type': 'joined'})
     logger.info('[%s] Client joined', session_id)
 
-    host_ws = session['host']
-    async for msg in ws:
-        if msg.type == WSMsgType.TEXT:
-            try:
-                await host_ws.send_str(msg.data)
-            except Exception:
-                break
-        elif msg.type == WSMsgType.BINARY:
-            try:
-                await host_ws.send_bytes(msg.data)
-            except Exception:
-                break
-        elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
-            break
+    # Wait until _host_session finishes the relay (keeps this WS alive)
+    await session['done'].wait()
 
 
-# ── HTTP / WebSocket handler ───────────────────────────────────────────────────
+# ── HTTP / WebSocket entry point ──────────────────────────────────────────────
 
 async def root_handler(request):
-    """Handles both HTTP health-checks (GET/HEAD) and WebSocket upgrades."""
     if request.headers.get('Upgrade', '').lower() == 'websocket':
-        # WebSocket connection from host or client
-        ws = web.WebSocketResponse(heartbeat=20, receive_timeout=120)
+        ws = web.WebSocketResponse(heartbeat=25, receive_timeout=120)
         await ws.prepare(request)
 
         try:
-            first_msg = await asyncio.wait_for(ws.receive(), timeout=15.0)
+            first = await asyncio.wait_for(ws.receive(), timeout=20.0)
         except asyncio.TimeoutError:
             await ws.close()
             return ws
 
-        if first_msg.type != WSMsgType.TEXT:
+        if first.type != WSMsgType.TEXT:
             await ws.close()
             return ws
 
         try:
-            msg = json.loads(first_msg.data)
+            msg = json.loads(first.data)
         except (json.JSONDecodeError, TypeError):
             await ws.close()
             return ws
@@ -149,15 +149,15 @@ async def root_handler(request):
 
         return ws
 
-    # Plain HTTP request (Render health-check, browser, etc.)
+    # Health check (GET / HEAD)
     return web.Response(text="EcranDistant Relay OK\n")
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 async def start(host: str = '0.0.0.0', port: int = 9000):
-    app = web.Application()
-    app.router.add_route('*', '/', root_handler)
+    app = web.Application(client_max_size=20 * 1024 * 1024)  # 20 MB max message
+    app.router.add_route('*', '/',       root_handler)
     app.router.add_route('*', '/health', root_handler)
 
     runner = web.AppRunner(app)
@@ -166,4 +166,4 @@ async def start(host: str = '0.0.0.0', port: int = 9000):
     await site.start()
 
     logger.info('Relay server running on %s:%d', host, port)
-    await asyncio.Future()  # run forever
+    await asyncio.Future()
