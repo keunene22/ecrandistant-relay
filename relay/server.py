@@ -35,14 +35,13 @@ async def _send_json(ws, data: dict):
 # ── Bidirectional forwarder ────────────────────────────────────────────────────
 
 async def _forward(src_ws, dst_ws):
-    """Forward all messages from src to dst until one side closes."""
+    """Forward BINARY messages only — TEXT messages are relay-internal control."""
     async for msg in src_ws:
         if msg.type == WSMsgType.BINARY:
             await dst_ws.send_bytes(msg.data)
-        elif msg.type == WSMsgType.TEXT:
-            await dst_ws.send_str(msg.data)
         elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
             break
+        # TEXT (heartbeat_ack, keepalive…) → filtered, not forwarded
 
 
 # ── Host handler ───────────────────────────────────────────────────────────────
