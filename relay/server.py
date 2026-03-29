@@ -120,7 +120,7 @@ async def root_handler(request):
     """Handles both HTTP health-checks (GET/HEAD) and WebSocket upgrades."""
     if request.headers.get('Upgrade', '').lower() == 'websocket':
         # WebSocket connection from host or client
-        ws = web.WebSocketResponse()
+        ws = web.WebSocketResponse(heartbeat=20, receive_timeout=120)
         await ws.prepare(request)
 
         try:
