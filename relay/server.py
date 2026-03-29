@@ -64,11 +64,18 @@ async def _host_session(ws):
     try:
         await _send_json(ws, {'type': 'registered', 'session_id': session_id})
 
-        try:
-            await asyncio.wait_for(client_joined.wait(), timeout=600.0)
-        except asyncio.TimeoutError:
-            await _send_json(ws, {'type': 'timeout', 'reason': 'No client joined within 10 min'})
-            return
+        # Wait for client with periodic heartbeats to keep Render's proxy alive
+        deadline = 600.0
+        elapsed  = 0.0
+        while not client_joined.is_set():
+            if elapsed >= deadline:
+                await _send_json(ws, {'type': 'timeout', 'reason': 'No client joined within 10 min'})
+                return
+            try:
+                await asyncio.wait_for(asyncio.shield(client_joined.wait()), timeout=25.0)
+            except asyncio.TimeoutError:
+                elapsed += 25.0
+                await _send_json(ws, {'type': 'heartbeat'})
 
         client_ws = client_holder[0]
         await _send_json(ws, {'type': 'peer_connected'})
