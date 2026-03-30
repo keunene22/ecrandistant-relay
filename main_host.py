@@ -155,7 +155,7 @@ class HostWorker(QThread):
         capture = ScreenCapture(quality=50)
         inp     = InputHandler()
 
-        # Réveille le relay Render (free tier spin-down)
+        # Réveil du relay (Render free tier)
         self.log_message.emit('Réveil du relay…')
         http_url = self.relay_url.replace('wss://', 'https://').replace('ws://', 'http://')
         try:
@@ -164,40 +164,49 @@ class HostWorker(QThread):
         except Exception:
             pass
         self.log_message.emit('Connexion au relay…')
-        async with websockets.connect(
-            self.relay_url,
-            ping_interval=20,
-            ping_timeout=60,
-            open_timeout=30,
-        ) as ws:
-            await ws.send(json.dumps({'role': 'host'}))
-            resp = json.loads(await ws.recv())
-            if resp.get('type') != 'registered':
-                raise RuntimeError(resp.get('reason', str(resp)))
 
-            sid = resp['session_id']
-            self.session_ready.emit(sid)
-            self.log_message.emit(f'Session ID: {sid} — en attente du client…')
+        # Boucle de reconnexion automatique
+        while True:
+            try:
+                async with websockets.connect(
+                    self.relay_url,
+                    ping_interval=15,
+                    ping_timeout=30,
+                    open_timeout=30,
+                ) as ws:
+                    await ws.send(json.dumps({'role': 'host'}))
+                    resp = json.loads(await ws.recv())
+                    if resp.get('type') != 'registered':
+                        raise RuntimeError(resp.get('reason', str(resp)))
 
-            # Wait for peer_connected — send keepalive every 15s (both directions)
-            while True:
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=15.0)
-                    msg = json.loads(raw)
-                    t = msg.get('type')
-                    if t == 'peer_connected':
-                        break
-                    elif t == 'heartbeat':
-                        await ws.send(json.dumps({'type': 'heartbeat_ack'}))
-                    elif t == 'timeout':
-                        raise RuntimeError('Aucun client connecté dans le délai imparti.')
-                except asyncio.TimeoutError:
-                    # Envoie un keepalive host→relay pour garder la connexion vivante
-                    await ws.send(json.dumps({'type': 'keepalive'}))
+                    sid = resp['session_id']
+                    self.session_ready.emit(sid)
+                    self.log_message.emit(f'Session ID: {sid} — en attente du client…')
 
-            self.client_joined.emit()
-            self.log_message.emit('Client connecté ! Démarrage de la session…')
-            await run_host_session(ws, self._hash(), capture, inp, 20, audio)
+                    # Attente du client avec keepalives bidirectionnels
+                    while True:
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
+                            msg = json.loads(raw)
+                            t = msg.get('type')
+                            if t == 'peer_connected':
+                                break
+                            elif t == 'heartbeat':
+                                await ws.send(json.dumps({'type': 'heartbeat_ack'}))
+                        except asyncio.TimeoutError:
+                            await ws.send(json.dumps({'type': 'keepalive'}))
+
+                    # Client connecté — démarrage de la session
+                    self.client_joined.emit()
+                    self.log_message.emit('Client connecté ! Démarrage de la session…')
+                    await run_host_session(ws, self._hash(), capture, inp, 20, audio)
+                    return  # session terminée normalement
+
+            except Exception as e:
+                # Connexion perdue → reconnexion automatique dans 3s
+                self.log_message.emit(f'Reconnexion dans 3s… ({e})')
+                await asyncio.sleep(3)
+                self.log_message.emit('Reconnexion au relay…')
 
     async def _run_direct(self):
         from host.server import RemoteDesktopServer
@@ -320,7 +329,7 @@ class HostWindow(QWidget):
         lay.setSpacing(14)
 
         lay.addWidget(QLabel('🌐  Mode Relay — URL du serveur relay :'))
-        self._relay_edit = QLineEdit('ecrandistant-relay-production.up.railway.app')
+        self._relay_edit = QLineEdit('ecrandistant-relay.onrender.com')
         lay.addWidget(self._relay_edit)
 
         row = QHBoxLayout()
