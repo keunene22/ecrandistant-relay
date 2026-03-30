@@ -71,9 +71,9 @@ async def _host_session(ws):
                 await _send_json(ws, {'type': 'timeout', 'reason': 'No client joined within 10 min'})
                 return
             try:
-                await asyncio.wait_for(asyncio.shield(client_joined.wait()), timeout=25.0)
+                await asyncio.wait_for(asyncio.shield(client_joined.wait()), timeout=10.0)
             except asyncio.TimeoutError:
-                elapsed += 25.0
+                elapsed += 10.0
                 await _send_json(ws, {'type': 'heartbeat'})
 
         client_ws = client_holder[0]

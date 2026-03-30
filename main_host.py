@@ -155,6 +155,14 @@ class HostWorker(QThread):
         capture = ScreenCapture(quality=50)
         inp     = InputHandler()
 
+        # Réveille le relay Render (free tier spin-down)
+        self.log_message.emit('Réveil du relay…')
+        http_url = self.relay_url.replace('wss://', 'https://').replace('ws://', 'http://')
+        try:
+            import urllib.request
+            urllib.request.urlopen(http_url, timeout=60)
+        except Exception:
+            pass
         self.log_message.emit('Connexion au relay…')
         async with websockets.connect(
             self.relay_url,
@@ -171,18 +179,21 @@ class HostWorker(QThread):
             self.session_ready.emit(sid)
             self.log_message.emit(f'Session ID: {sid} — en attente du client…')
 
-            # Wait for peer_connected, ignoring heartbeat messages
+            # Wait for peer_connected — send keepalive every 15s (both directions)
             while True:
-                raw = await ws.recv()
-                msg = json.loads(raw)
-                t = msg.get('type')
-                if t == 'peer_connected':
-                    break
-                elif t == 'heartbeat':
-                    await ws.send(json.dumps({'type': 'heartbeat_ack'}))
-                elif t == 'timeout':
-                    raise RuntimeError('Aucun client connecté dans le délai imparti.')
-                # ignore unknown messages
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=15.0)
+                    msg = json.loads(raw)
+                    t = msg.get('type')
+                    if t == 'peer_connected':
+                        break
+                    elif t == 'heartbeat':
+                        await ws.send(json.dumps({'type': 'heartbeat_ack'}))
+                    elif t == 'timeout':
+                        raise RuntimeError('Aucun client connecté dans le délai imparti.')
+                except asyncio.TimeoutError:
+                    # Envoie un keepalive host→relay pour garder la connexion vivante
+                    await ws.send(json.dumps({'type': 'keepalive'}))
 
             self.client_joined.emit()
             self.log_message.emit('Client connecté ! Démarrage de la session…')
@@ -309,7 +320,7 @@ class HostWindow(QWidget):
         lay.setSpacing(14)
 
         lay.addWidget(QLabel('🌐  Mode Relay — URL du serveur relay :'))
-        self._relay_edit = QLineEdit('ecrandistant-relay.onrender.com')
+        self._relay_edit = QLineEdit('ecrandistant-relay-production.up.railway.app')
         lay.addWidget(self._relay_edit)
 
         row = QHBoxLayout()
