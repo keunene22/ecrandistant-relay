@@ -39,8 +39,9 @@ input:focus{border-color:#89b4fa}
 .tbtn:active{background:#585b70}
 .tbtn.active{background:#89b4fa;color:#1e1e2e}
 #canvas-wrap{flex:1;overflow:hidden;position:relative;background:#000;
-  display:flex;align-items:center;justify-content:center}
-#screen{max-width:100%;max-height:100%;object-fit:contain;touch-action:none;display:block}
+  display:flex;align-items:center;justify-content:center;touch-action:none}
+#screen{max-width:100%;max-height:100%;display:block;
+  transform-origin:center center;will-change:transform}
 #kbd-input{position:fixed;left:-9999px;top:0;opacity:0;width:1px;height:1px}
 #audio-banner{position:fixed;bottom:60px;left:50%;transform:translateX(-50%);
   background:#313244;border-radius:20px;padding:8px 16px;font-size:13px;
@@ -121,6 +122,9 @@ input:focus{border-color:#89b4fa}
     <button class="tbtn" onclick="openChat()">💬 Chat</button>
     <button class="tbtn" onclick="openFiles()">📁 Fichiers</button>
     <button class="tbtn" onclick="sendCtrlAltDel()">⚡ CAD</button>
+    <button class="tbtn" onclick="zoomBy(1.3)" style="padding:6px 10px;font-size:15px">＋</button>
+    <button class="tbtn" onclick="zoomBy(0.77)" style="padding:6px 10px;font-size:15px">－</button>
+    <button class="tbtn" onclick="resetView()" id="zoom-btn" style="min-width:46px;font-size:11px">100%</button>
     <span id="fps-label" style="color:#6c7086;font-size:12px;margin-left:auto">--fps</span>
   </div>
   <div id="canvas-wrap">
@@ -420,15 +424,49 @@ function updateFps(){
   frameCount=0; lastFpsT=now;
 }
 
+// ── Zoom & Pan ─────────────────────────────────────────────────────────
+let viewZoom=1, viewPanX=0, viewPanY=0;
+const MIN_ZOOM=0.9, MAX_ZOOM=8;
+
+function applyView(){
+  if(viewZoom===1&&viewPanX===0&&viewPanY===0){
+    canvas.style.transform='';
+  }else{
+    canvas.style.transform=
+      `translate(${viewPanX}px,${viewPanY}px) scale(${viewZoom})`;
+  }
+  document.getElementById('zoom-btn').textContent=
+    (viewZoom===1)?'⊡ fit':Math.round(viewZoom*100)+'%';
+}
+
+function zoomBy(factor, pivotX, pivotY){
+  const newZoom=Math.max(MIN_ZOOM,Math.min(MAX_ZOOM,viewZoom*factor));
+  if(pivotX!==undefined){
+    // Zoom toward a pivot point (pinch center) in viewport coords
+    const r=canvas.getBoundingClientRect();
+    const cx=r.left+r.width/2, cy=r.top+r.height/2;
+    // The pivot in canvas-center coordinates (before new zoom):
+    const dx=pivotX-cx, dy=pivotY-cy;
+    viewPanX+= dx*(1-newZoom/viewZoom);
+    viewPanY+= dy*(1-newZoom/viewZoom);
+  }
+  viewZoom=newZoom;
+  if(viewZoom<1.05){viewZoom=1;viewPanX=0;viewPanY=0;}
+  applyView();
+}
+
+function resetView(){viewZoom=1;viewPanX=0;viewPanY=0;applyView();}
+
 // ── Touch → Mouse ─────────────────────────────────────────────────────
+const wrap=document.getElementById('canvas-wrap');
 let lastTouchX=0,lastTouchY=0,touchStartX=0,touchStartY=0,touchMoved=false;
 
 function getRemote(touch){
   const r=canvas.getBoundingClientRect();
   const scaleX=remoteW/r.width, scaleY=remoteH/r.height;
   return{
-    x:Math.round((touch.clientX-r.left)*scaleX),
-    y:Math.round((touch.clientY-r.top)*scaleY)
+    x:Math.max(0,Math.min(remoteW-1,Math.round((touch.clientX-r.left)*scaleX))),
+    y:Math.max(0,Math.min(remoteH-1,Math.round((touch.clientY-r.top)*scaleY)))
   };
 }
 
@@ -437,8 +475,10 @@ function sendMouse(ev,x,y,btn='left',pressed=true){
   ws.send(encodeJson(MSG_MOUSE,{event:ev,x,y,button:btn,pressed}));
 }
 
-canvas.addEventListener('touchstart',e=>{
+// ── Single-finger: mouse control ───────────────────────────────────────
+wrap.addEventListener('touchstart',e=>{
   e.preventDefault();
+  if(e.touches.length>1)return;
   const t=e.touches[0];
   const {x,y}=getRemote(t);
   touchStartX=t.clientX; touchStartY=t.clientY;
@@ -447,8 +487,9 @@ canvas.addEventListener('touchstart',e=>{
   sendMouse('move',x,y);
 },{passive:false});
 
-canvas.addEventListener('touchmove',e=>{
+wrap.addEventListener('touchmove',e=>{
   e.preventDefault();
+  if(e.touches.length>1)return;
   const t=e.touches[0];
   const {x,y}=getRemote(t);
   const dx=t.clientX-touchStartX, dy=t.clientY-touchStartY;
@@ -457,46 +498,72 @@ canvas.addEventListener('touchmove',e=>{
   sendMouse('move',x,y);
 },{passive:false});
 
-canvas.addEventListener('touchend',e=>{
+wrap.addEventListener('touchend',e=>{
   e.preventDefault();
-  if(!touchMoved){
+  if(e.changedTouches.length>0&&e.touches.length===0&&!touchMoved){
     sendMouse('click',lastTouchX,lastTouchY,'left',true);
     setTimeout(()=>sendMouse('click',lastTouchX,lastTouchY,'left',false),80);
   }
 },{passive:false});
 
-// Long press = right click
+// ── Long press = right click ───────────────────────────────────────────
 let longPressTimer=null;
-canvas.addEventListener('touchstart',e=>{
+wrap.addEventListener('touchstart',e=>{
+  if(e.touches.length>1){clearTimeout(longPressTimer);return;}
   longPressTimer=setTimeout(()=>{
     const t=e.touches[0];
     const {x,y}=getRemote(t);
+    touchMoved=true; // prevent click on touchend
     sendMouse('click',x,y,'right',true);
     setTimeout(()=>sendMouse('click',x,y,'right',false),80);
     if(navigator.vibrate)navigator.vibrate(40);
   },600);
 },{passive:false});
-canvas.addEventListener('touchend',()=>clearTimeout(longPressTimer),{passive:false});
-canvas.addEventListener('touchmove',()=>clearTimeout(longPressTimer),{passive:false});
+wrap.addEventListener('touchend',()=>clearTimeout(longPressTimer),{passive:false});
+wrap.addEventListener('touchmove',()=>clearTimeout(longPressTimer),{passive:false});
 
-// Two-finger scroll
-let lastPinchDist=0;
-canvas.addEventListener('touchmove',e=>{
+// ── Two-finger: pinch-to-zoom + pan ───────────────────────────────────
+let pinchStartDist=0, pinchStartZoom=1;
+let pinchStartPanX=0, pinchStartPanY=0;
+let pinchStartMidX=0, pinchStartMidY=0;
+
+wrap.addEventListener('touchstart',e=>{
   if(e.touches.length===2){
     e.preventDefault();
-    const t1=e.touches[0],t2=e.touches[1];
-    const cx=(getRemote(t1).x+getRemote(t2).x)/2;
-    const cy=(getRemote(t1).y+getRemote(t2).y)/2;
-    const dist=Math.hypot(t2.clientX-t1.clientX,t2.clientY-t1.clientY);
-    if(lastPinchDist){
-      const dy=dist-lastPinchDist;
-      if(Math.abs(dy)>3)
-        ws.send(encodeJson(MSG_MOUSE,{event:'scroll',x:Math.round(cx),y:Math.round(cy),dx:0,dy:Math.round(dy/10)}));
-    }
-    lastPinchDist=dist;
+    pinchStartDist=Math.hypot(
+      e.touches[1].clientX-e.touches[0].clientX,
+      e.touches[1].clientY-e.touches[0].clientY);
+    pinchStartZoom=viewZoom;
+    pinchStartPanX=viewPanX; pinchStartPanY=viewPanY;
+    pinchStartMidX=(e.touches[0].clientX+e.touches[1].clientX)/2;
+    pinchStartMidY=(e.touches[0].clientY+e.touches[1].clientY)/2;
   }
 },{passive:false});
-canvas.addEventListener('touchend',()=>{lastPinchDist=0;},{passive:false});
+
+wrap.addEventListener('touchmove',e=>{
+  if(e.touches.length!==2)return;
+  e.preventDefault();
+  const dist=Math.hypot(
+    e.touches[1].clientX-e.touches[0].clientX,
+    e.touches[1].clientY-e.touches[0].clientY);
+  const midX=(e.touches[0].clientX+e.touches[1].clientX)/2;
+  const midY=(e.touches[0].clientY+e.touches[1].clientY)/2;
+
+  const newZoom=Math.max(MIN_ZOOM,Math.min(MAX_ZOOM,
+    pinchStartZoom*dist/pinchStartDist));
+
+  // Pan: track midpoint movement + zoom-induced shift toward pivot
+  const r=canvas.getBoundingClientRect();
+  const cx=r.left+r.width/2, cy=r.top+r.height/2;
+  const dx=pinchStartMidX-cx, dy=pinchStartMidY-cy;
+
+  viewZoom=newZoom;
+  viewPanX=pinchStartPanX+(midX-pinchStartMidX)+dx*(1-newZoom/pinchStartZoom);
+  viewPanY=pinchStartPanY+(midY-pinchStartMidY)+dy*(1-newZoom/pinchStartZoom);
+
+  if(viewZoom<1.05){viewZoom=1;viewPanX=0;viewPanY=0;}
+  applyView();
+},{passive:false});
 
 // ── Keyboard ──────────────────────────────────────────────────────────
 const kbdInput=document.getElementById('kbd-input');
