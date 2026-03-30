@@ -45,6 +45,46 @@ input:focus{border-color:#89b4fa}
 #audio-banner{position:fixed;bottom:60px;left:50%;transform:translateX(-50%);
   background:#313244;border-radius:20px;padding:8px 16px;font-size:13px;
   color:#f9e2af;display:none;z-index:99}
+
+/* ── Overlay panels (chat / files) ── */
+.panel{position:fixed;bottom:0;left:0;right:0;background:#181825;border-top:2px solid #313244;
+  max-height:60dvh;display:none;flex-direction:column;z-index:200;border-radius:16px 16px 0 0}
+.panel.open{display:flex}
+.panel-header{display:flex;align-items:center;padding:10px 16px;border-bottom:1px solid #313244;flex-shrink:0}
+.panel-header span{flex:1;font-weight:700;color:#89b4fa}
+.panel-close{background:none;border:none;color:#6c7086;font-size:20px;cursor:pointer;padding:0 4px}
+.panel-body{overflow-y:auto;flex:1;padding:12px}
+
+/* Chat */
+#chat-log{display:flex;flex-direction:column;gap:8px;min-height:60px}
+.chat-msg{border-radius:10px;padding:8px 12px;max-width:80%;font-size:14px;line-height:1.4}
+.chat-msg.me{background:#313244;align-self:flex-end;color:#cdd6f4}
+.chat-msg.host{background:#1e3a5f;align-self:flex-start;color:#89b4fa}
+.chat-msg .who{font-size:11px;opacity:.6;margin-bottom:2px}
+#chat-input-row{display:flex;gap:8px;padding:10px 12px;border-top:1px solid #313244;flex-shrink:0}
+#chat-input{flex:1;background:#313244;border:1px solid #45475a;border-radius:8px;
+  padding:8px 12px;color:#cdd6f4;font-size:15px;outline:none}
+#chat-send{background:#89b4fa;color:#1e1e2e;border:none;border-radius:8px;
+  padding:8px 16px;font-weight:700;cursor:pointer}
+
+/* File browser */
+#file-list{display:flex;flex-direction:column;gap:4px}
+.file-entry{display:flex;align-items:center;gap:10px;padding:8px 10px;
+  background:#1e1e2e;border-radius:8px;cursor:pointer;border:1px solid #313244}
+.file-entry:active{background:#313244}
+.file-icon{font-size:20px;flex-shrink:0}
+.file-name{flex:1;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file-size{font-size:11px;color:#6c7086;flex-shrink:0}
+#file-path-bar{display:flex;align-items:center;gap:6px;padding:0 0 8px}
+#file-path-lbl{flex:1;font-size:12px;color:#89b4fa;overflow:hidden;text-overflow:ellipsis}
+#file-progress{display:none;flex-direction:column;gap:6px;padding:10px 0}
+#file-prog-bar{height:8px;background:#313244;border-radius:4px;overflow:hidden}
+#file-prog-fill{height:100%;background:#a6e3a1;border-radius:4px;width:0%;transition:width .2s}
+#file-prog-lbl{font-size:12px;color:#cdd6f4;text-align:center}
+/* Upload area */
+#upload-area{border:2px dashed #45475a;border-radius:12px;padding:24px;text-align:center;
+  color:#6c7086;font-size:14px;margin-bottom:10px;cursor:pointer}
+#upload-area:active{border-color:#89b4fa;color:#cdd6f4}
 </style>
 </head>
 <body>
@@ -78,14 +118,59 @@ input:focus{border-color:#89b4fa}
     <button class="tbtn" onclick="disconnect()">⏹ Quitter</button>
     <button class="tbtn" id="btn-kbd" onclick="toggleKbd()">⌨️ Clavier</button>
     <button class="tbtn" id="btn-audio" onclick="toggleAudio()">🔇 Son</button>
-    <button class="tbtn" onclick="sendCtrlAltDel()">⚡ Ctrl+Alt+Del</button>
-    <button class="tbtn" onclick="sendKey('win')">🪟 Win</button>
+    <button class="tbtn" onclick="openChat()">💬 Chat</button>
+    <button class="tbtn" onclick="openFiles()">📁 Fichiers</button>
+    <button class="tbtn" onclick="sendCtrlAltDel()">⚡ CAD</button>
     <span id="fps-label" style="color:#6c7086;font-size:12px;margin-left:auto">--fps</span>
   </div>
   <div id="canvas-wrap">
     <canvas id="screen"></canvas>
   </div>
   <div id="audio-banner">🔊 Tap pour activer le son</div>
+</div>
+
+<!-- ══ CHAT PANEL ══════════════════════════════════════════════════════ -->
+<div id="chat-panel" class="panel">
+  <div class="panel-header">
+    <span>💬 Chat</span>
+    <button class="panel-close" onclick="closePanel('chat-panel')">✕</button>
+  </div>
+  <div class="panel-body" id="chat-log"></div>
+  <div id="chat-input-row">
+    <input id="chat-input" placeholder="Message…" autocorrect="off" spellcheck="false">
+    <button id="chat-send" onclick="sendChatMsg()">▶</button>
+  </div>
+</div>
+
+<!-- ══ FILE PANEL ═══════════════════════════════════════════════════════ -->
+<div id="file-panel" class="panel">
+  <div class="panel-header">
+    <span>📁 Fichiers</span>
+    <button class="panel-close" onclick="closePanel('file-panel')">✕</button>
+  </div>
+  <div class="panel-body">
+
+    <!-- Upload section -->
+    <div style="font-size:12px;color:#6c7086;margin-bottom:6px">📤 ENVOYER VERS LE HOST</div>
+    <div id="upload-area" onclick="document.getElementById('file-input').click()">
+      📂  Appuyez pour choisir un fichier
+    </div>
+    <input id="file-input" type="file" style="display:none" onchange="uploadFile(this.files[0])">
+
+    <div id="file-progress">
+      <div id="file-prog-bar"><div id="file-prog-fill"></div></div>
+      <div id="file-prog-lbl">0 / 0</div>
+    </div>
+
+    <!-- Browse section -->
+    <div style="font-size:12px;color:#6c7086;margin:12px 0 6px">📥 TÉLÉCHARGER DEPUIS LE HOST</div>
+    <div id="file-path-bar">
+      <span id="file-path-lbl">…</span>
+      <button class="tbtn" onclick="fileBrowseParent()" style="padding:4px 10px">↑</button>
+      <button class="tbtn" onclick="fileBrowse(fileCurPath)" style="padding:4px 10px">🔄</button>
+    </div>
+    <div id="file-list"></div>
+  </div>
 </div>
 
 <!-- Hidden keyboard input -->
@@ -97,7 +182,11 @@ input:focus{border-color:#89b4fa}
 const MSG_FRAME=0x01,MSG_MOUSE=0x02,MSG_KEY=0x03,MSG_AUTH=0x04,
       MSG_AUTH_OK=0x05,MSG_AUTH_FAIL=0x06,MSG_PING=0x07,MSG_PONG=0x08,
       MSG_CONFIG=0x09,MSG_SELECT_MON=0x0A,MSG_MON_CHANGED=0x0B,
-      MSG_CLIPBOARD=0x0C,MSG_AUDIO_CFG=0x0D,MSG_AUDIO=0x13;
+      MSG_CLIPBOARD=0x0C,MSG_AUDIO_CFG=0x0D,MSG_AUDIO=0x13,
+      MSG_FILE_SEND_REQ=0x20,MSG_FILE_SEND_ACK=0x21,MSG_FILE_CHUNK=0x22,
+      MSG_FILE_DONE=0x23,MSG_FILE_ABORT=0x24,MSG_FILE_BROWSE=0x25,
+      MSG_FILE_LIST=0x26,MSG_FILE_GET_REQ=0x27,MSG_FILE_GET_INFO=0x28,
+      MSG_CHAT=0x30;
 
 // ── State ──────────────────────────────────────────────────────────────
 let ws=null, remoteW=1920, remoteH=1080;
@@ -105,6 +194,11 @@ let audioEnabled=false, audioCtx=null, audioQueue=[], audioPlaying=false;
 let audioSR=48000, audioCH=2, audioNode=null;
 let frameCount=0, lastFpsT=Date.now();
 const enc=new TextEncoder(), dec=new TextDecoder();
+
+// File state
+let fileCurPath='', fileCurParent='';
+let fileDownloads={};   // tid → {name, size, parts:[Uint8Array]}
+let fileUploadId=null;
 
 // ── Protocol ──────────────────────────────────────────────────────────
 function encodeJson(type, payload){
@@ -126,10 +220,22 @@ function decodeMsg(buf){
     const pcm=pako.inflate(b.slice(4));
     return {_t:'audio',sr,ch,pcm};
   }
+  if(t===MSG_FILE_CHUNK){
+    const tid=((b[1]<<24)|(b[2]<<16)|(b[3]<<8)|b[4])>>>0;
+    return {_t:'file_chunk',_mt:MSG_FILE_CHUNK,id:tid,data:b.slice(5)};
+  }
   try{
     const p=JSON.parse(dec.decode(b.slice(1)));
     p._mt=t; return p;
   }catch(e){return {_mt:t};}
+}
+
+function encodeFileChunk(tid, data){
+  const buf=new Uint8Array(5+data.length);
+  buf[0]=MSG_FILE_CHUNK;
+  new DataView(buf.buffer).setUint32(1,tid,false);
+  buf.set(data,5);
+  return buf.buffer;
 }
 
 // ── Connect ───────────────────────────────────────────────────────────
@@ -238,6 +344,58 @@ function onMessage(e){
     if(audioEnabled)playAudioChunk(msg);
   } else if(msg._mt===MSG_PONG){
     // pong ok
+
+  // ── Chat ────────────────────────────────────────────────────────────
+  } else if(msg._mt===MSG_CHAT){
+    appendChat(msg.text, msg.sender||'host');
+
+  // ── File: download info ──────────────────────────────────────────────
+  } else if(msg._mt===MSG_FILE_GET_INFO){
+    const {id,name,size}=msg;
+    fileDownloads[id]={name,size,parts:[],received:0};
+    showFileProgress(true, name, 0, size);
+
+  // ── File: download chunk ─────────────────────────────────────────────
+  } else if(msg._t==='file_chunk'){
+    const dl=fileDownloads[msg.id];
+    if(dl){
+      dl.parts.push(msg.data.slice());
+      dl.received+=msg.data.length;
+      showFileProgress(true, dl.name, dl.received, dl.size);
+    }
+
+  // ── File: download done ──────────────────────────────────────────────
+  } else if(msg._mt===MSG_FILE_DONE){
+    const dl=fileDownloads[msg.id];
+    if(dl){
+      const blob=new Blob(dl.parts);
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(blob);
+      a.download=dl.name;
+      a.click();
+      delete fileDownloads[msg.id];
+      showFileProgress(false);
+      document.getElementById('file-prog-lbl').textContent='✅ Téléchargé !';
+    }
+
+  // ── File: abort ──────────────────────────────────────────────────────
+  } else if(msg._mt===MSG_FILE_ABORT){
+    delete fileDownloads[msg.id];
+    showFileProgress(false);
+    document.getElementById('file-prog-lbl').textContent='❌ '+msg.reason;
+
+  // ── File: upload ack ─────────────────────────────────────────────────
+  } else if(msg._mt===MSG_FILE_SEND_ACK){
+    if(!msg.ok){
+      setUploadStatus('❌ Refusé : '+msg.reason);
+      fileUploadId=null;
+    }
+
+  // ── File: directory listing ──────────────────────────────────────────
+  } else if(msg._mt===MSG_FILE_LIST){
+    fileCurPath=msg.path||'';
+    fileCurParent=msg.parent||'';
+    renderFileList(msg.entries||[]);
   }
 }
 
@@ -426,6 +584,157 @@ function playAudioChunk(msg){
     src.start(nextAudioTime);
     nextAudioTime+=buf.duration;
   }catch(e){}
+}
+
+// ── Chat ──────────────────────────────────────────────────────────────
+function openChat(){
+  document.getElementById('file-panel').classList.remove('open');
+  document.getElementById('chat-panel').classList.toggle('open');
+}
+function openFiles(){
+  document.getElementById('chat-panel').classList.remove('open');
+  document.getElementById('file-panel').classList.toggle('open');
+  if(document.getElementById('file-panel').classList.contains('open')&&!fileCurPath){
+    fileBrowse('');
+  }
+}
+function closePanel(id){document.getElementById(id).classList.remove('open');}
+
+function sendChatMsg(){
+  const inp=document.getElementById('chat-input');
+  const text=inp.value.trim();
+  if(!text||!ws||ws.readyState!==1)return;
+  ws.send(encodeJson(MSG_CHAT,{text,sender:'client',ts:Math.floor(Date.now()/1000)}));
+  appendChat(text,'client');
+  inp.value='';
+}
+document.addEventListener('DOMContentLoaded',()=>{
+  const inp=document.getElementById('chat-input');
+  if(inp)inp.addEventListener('keydown',e=>{if(e.key==='Enter')sendChatMsg();});
+});
+
+function appendChat(text, sender){
+  const log=document.getElementById('chat-log');
+  const d=document.createElement('div');
+  d.className='chat-msg '+(sender==='client'?'me':'host');
+  const who=sender==='client'?'Vous':'Host';
+  const t=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  d.innerHTML=`<div class="who">${who} ${t}</div>${escHtml(text)}`;
+  log.appendChild(d);
+  log.scrollTop=log.scrollHeight;
+  // Flash tab if panel closed
+  if(!document.getElementById('chat-panel').classList.contains('open')&&sender==='host'){
+    const btn=document.querySelector('.tbtn[onclick="openChat()"]');
+    if(btn){btn.textContent='💬 Chat ●';setTimeout(()=>{btn.textContent='💬 Chat';},3000);}
+  }
+}
+function escHtml(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── File browser / upload ─────────────────────────────────────────────
+function fileBrowse(path){
+  if(!ws||ws.readyState!==1)return;
+  const id=Date.now()&0xFFFFFFFF;
+  document.getElementById('file-path-lbl').textContent='⏳…';
+  document.getElementById('file-list').innerHTML='';
+  ws.send(encodeJson(MSG_FILE_BROWSE,{id,path:path||''}));
+}
+function fileBrowseParent(){if(fileCurParent)fileBrowse(fileCurParent);}
+
+function renderFileList(entries){
+  const lbl=document.getElementById('file-path-lbl');
+  lbl.textContent=fileCurPath||'/';
+  const list=document.getElementById('file-list');
+  list.innerHTML='';
+  entries.forEach(e=>{
+    const div=document.createElement('div');
+    div.className='file-entry';
+    const icon=e.is_dir?'📁':'📄';
+    const size=e.is_dir?'':fmtSize(e.size);
+    div.innerHTML=`<span class="file-icon">${icon}</span>`
+      +`<span class="file-name">${escHtml(e.name)}</span>`
+      +`<span class="file-size">${size}</span>`;
+    div.onclick=()=>{
+      if(e.is_dir){
+        // Navigate into folder
+        const sep=(fileCurPath&&!fileCurPath.endsWith('/')&&!fileCurPath.endsWith('\\'))?
+                  (fileCurPath.includes('\\')?'\\':'/') : '';
+        fileBrowse(fileCurPath+sep+e.name);
+      } else {
+        fileDownload(e.name);
+      }
+    };
+    list.appendChild(div);
+  });
+}
+
+function fileDownload(name){
+  if(!ws||ws.readyState!==1)return;
+  const sep=fileCurPath.includes('\\')?'\\':'/';
+  const path=fileCurPath+sep+name;
+  const tid=Date.now()&0xFFFFFFFF;
+  ws.send(encodeJson(MSG_FILE_GET_REQ,{id:tid,path}));
+  showFileProgress(true, name, 0, 0);
+}
+
+function uploadFile(file){
+  if(!file||!ws||ws.readyState!==1)return;
+  const tid=Date.now()&0xFFFFFFFF;
+  fileUploadId=tid;
+  setUploadStatus('⏳ Lecture du fichier…');
+  document.getElementById('file-progress').style.display='flex';
+  document.getElementById('file-prog-fill').style.width='0%';
+  document.getElementById('file-prog-lbl').textContent='0 / '+fmtSize(file.size);
+
+  const reader=new FileReader();
+  reader.onload=()=>{
+    const data=new Uint8Array(reader.result);
+    ws.send(encodeJson(MSG_FILE_SEND_REQ,{id:tid,name:file.name,size:file.size}));
+    setUploadStatus('⏳ Envoi de '+file.name+'…');
+    const CHUNK=65536;
+    let sent=0;
+    function sendNext(){
+      if(sent>=data.length){
+        ws.send(encodeJson(MSG_FILE_DONE,{id:tid,name:file.name}));
+        setUploadStatus('✅ '+file.name+' envoyé !');
+        document.getElementById('file-prog-fill').style.width='100%';
+        fileUploadId=null;
+        document.getElementById('file-input').value='';
+        return;
+      }
+      const chunk=data.slice(sent,sent+CHUNK);
+      ws.send(encodeFileChunk(tid,chunk));
+      sent+=chunk.length;
+      const pct=Math.round(sent*100/file.size);
+      document.getElementById('file-prog-fill').style.width=pct+'%';
+      document.getElementById('file-prog-lbl').textContent=
+        fmtSize(sent)+' / '+fmtSize(file.size);
+      requestAnimationFrame(sendNext);
+    }
+    sendNext();
+  };
+  reader.readAsArrayBuffer(file);
+}
+function setUploadStatus(txt){
+  document.getElementById('file-prog-lbl').textContent=txt;
+  document.getElementById('file-progress').style.display='flex';
+}
+function showFileProgress(show, name, recv, total){
+  const fp=document.getElementById('file-progress');
+  fp.style.display=show?'flex':'none';
+  if(show){
+    const pct=total>0?Math.round(recv*100/total):0;
+    document.getElementById('file-prog-fill').style.width=pct+'%';
+    document.getElementById('file-prog-lbl').textContent=
+      (name||'')+(total>0?' — '+fmtSize(recv)+'/'+fmtSize(total):'');
+  }
+}
+function fmtSize(n){
+  if(n>=1e9)return(n/1e9).toFixed(1)+' Go';
+  if(n>=1e6)return(n/1e6).toFixed(1)+' Mo';
+  if(n>=1e3)return(n/1e3).toFixed(1)+' Ko';
+  return n+' o';
 }
 
 // ── Controls ──────────────────────────────────────────────────────────

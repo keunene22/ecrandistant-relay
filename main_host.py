@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QFrame, QStackedWidget,
-    QMessageBox, QSizePolicy,
+    QMessageBox, QSizePolicy, QDialog, QTextEdit,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QClipboard
@@ -116,6 +116,7 @@ class HostWorker(QThread):
     client_joined   = pyqtSignal()
     error_occurred  = pyqtSignal(str)
     log_message     = pyqtSignal(str)
+    chat_received   = pyqtSignal(str)   # text from client
 
     def __init__(self, mode: str, password: str,
                  relay_url: str = '', port: int = 8765,
@@ -126,10 +127,15 @@ class HostWorker(QThread):
         self.relay_url = relay_url
         self.port      = port
         self.use_tls   = use_tls
-        self._stop_event = threading.Event()
+        self._stop_event  = threading.Event()
+        self._chat_out    = None   # asyncio.Queue set in _run_relay
+        self._loop_ref    = None   # running event loop reference
 
     def run(self):
-        asyncio.run(self._run())
+        loop = asyncio.new_event_loop()
+        self._loop_ref = loop
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self._run())
 
     async def _run(self):
         try:
@@ -198,7 +204,12 @@ class HostWorker(QThread):
                     # Client connecté — démarrage de la session
                     self.client_joined.emit()
                     self.log_message.emit('Client connecté ! Démarrage de la session…')
-                    await run_host_session(ws, self._hash(), capture, inp, 20, audio)
+                    self._chat_out = asyncio.Queue()
+                    await run_host_session(
+                        ws, self._hash(), capture, inp, 20, audio,
+                        on_chat_recv=lambda t, s: self.chat_received.emit(t),
+                        chat_out_queue=self._chat_out,
+                    )
                     return  # session terminée normalement
 
             except Exception as e:
@@ -221,9 +232,76 @@ class HostWorker(QThread):
         self.log_message.emit(f'En écoute sur le port {self.port}…')
         await server.start()
 
+    def send_chat(self, text: str):
+        """Send a chat message to the connected client."""
+        if self._chat_out and self._loop_ref and self._loop_ref.is_running():
+            import time as _time
+            asyncio.run_coroutine_threadsafe(
+                self._chat_out.put({'text': text, 'sender': 'host',
+                                    'ts': int(_time.time())}),
+                self._loop_ref,
+            )
+
     def _hash(self):
         from host.server import hash_password
         return hash_password(self.password)
+
+
+# ── Chat dialog (host side) ────────────────────────────────────────────────────
+
+class HostChatDialog(QDialog):
+    def __init__(self, worker, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('💬 Chat')
+        self.setMinimumSize(360, 380)
+        self._worker = worker
+
+        lay = QVBoxLayout(self)
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setStyleSheet(
+            'background:#1e1e2e;color:#cdd6f4;border:1px solid #313244;border-radius:6px;'
+        )
+        lay.addWidget(self._log)
+
+        row = QHBoxLayout()
+        self._inp = QLineEdit()
+        self._inp.setPlaceholderText('Message…')
+        self._inp.setStyleSheet(
+            'background:#313244;color:#cdd6f4;border:1px solid #45475a;'
+            'border-radius:5px;padding:6px 10px;'
+        )
+        self._inp.returnPressed.connect(self._send)
+        btn = QPushButton('Envoyer')
+        btn.setStyleSheet(
+            'background:#89b4fa;color:#1e1e2e;font-weight:bold;'
+            'border-radius:5px;padding:6px 14px;'
+        )
+        btn.clicked.connect(self._send)
+        row.addWidget(self._inp)
+        row.addWidget(btn)
+        lay.addLayout(row)
+
+    def _send(self):
+        text = self._inp.text().strip()
+        if not text:
+            return
+        self._worker.send_chat(text)
+        self._append(text, 'host')
+        self._inp.clear()
+
+    def append_recv(self, text: str):
+        self._append(text, 'client')
+
+    def _append(self, text: str, sender: str):
+        import time as _t
+        color = '#89b4fa' if sender == 'client' else '#a6e3a1'
+        label = 'Client' if sender == 'client' else 'Vous'
+        ts = _t.strftime('%H:%M')
+        self._log.append(
+            f'<span style="color:{color};font-weight:bold">[{ts}] {label}:</span>'
+            f' <span style="color:#cdd6f4">{text}</span>'
+        )
 
 
 # ── Carte d'information (session) ──────────────────────────────────────────────
@@ -274,6 +352,8 @@ class HostWindow(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(self._stack)
+
+        self._chat_dialog: HostChatDialog | None = None
 
         self._stack.addWidget(self._build_menu())    # 0
         self._stack.addWidget(self._build_relay())   # 1
@@ -423,10 +503,16 @@ class HostWindow(QWidget):
 
         lay.addStretch()
 
+        btn_row = QHBoxLayout()
+        self._chat_btn = QPushButton('💬  Chat')
+        self._chat_btn.clicked.connect(self._open_chat)
+        btn_row.addWidget(self._chat_btn)
+
         stop_btn = QPushButton('⏹  Arrêter')
         stop_btn.setObjectName('danger')
         stop_btn.clicked.connect(self._stop)
-        lay.addWidget(stop_btn)
+        btn_row.addWidget(stop_btn)
+        lay.addLayout(btn_row)
         return w
 
     # ── Actions ────────────────────────────────────────────────────────────────
@@ -449,6 +535,7 @@ class HostWindow(QWidget):
         self._worker.client_joined.connect(self._on_client_joined)
         self._worker.error_occurred.connect(self._on_error)
         self._worker.log_message.connect(lambda m: logging.info(m))
+        self._worker.chat_received.connect(self._on_chat_received)
         self._worker.start()
 
     def _start_direct(self):
@@ -488,6 +575,25 @@ class HostWindow(QWidget):
 
         # Auto-copy session ID
         QApplication.clipboard().setText(sid)
+
+    def _open_chat(self):
+        if self._worker is None:
+            return
+        if self._chat_dialog is None:
+            self._chat_dialog = HostChatDialog(self._worker, self)
+        self._chat_dialog.show()
+        self._chat_dialog.raise_()
+
+    def _on_chat_received(self, text: str):
+        if self._chat_dialog is None and self._worker:
+            self._chat_dialog = HostChatDialog(self._worker, self)
+        if self._chat_dialog:
+            self._chat_dialog.append_recv(text)
+            self._chat_dialog.show()
+            self._chat_dialog.raise_()
+        # Also flash the chat button
+        self._chat_btn.setText('💬  Chat ●')
+        QTimer.singleShot(3000, lambda: self._chat_btn.setText('💬  Chat'))
 
     def _on_client_joined(self):
         self._status_lbl.setText('✅  Client connecté — session en cours')

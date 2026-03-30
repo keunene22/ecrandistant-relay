@@ -1,7 +1,11 @@
 import asyncio
 import json
 import logging
+import os
 import ssl
+import sys
+import time
+from pathlib import Path
 
 import websockets
 import websockets.exceptions
@@ -13,17 +17,81 @@ except Exception:
     _CLIP = False
 
 from shared.protocol import (
-    decode, encode_frame, encode_audio, encode_json, hash_password,
+    decode, encode_frame, encode_audio, encode_json, encode_file_chunk,
+    hash_password,
     MSG_AUTH, MSG_AUTH_OK, MSG_AUTH_FAIL,
     MSG_MOUSE, MSG_KEY, MSG_PING, MSG_PONG,
     MSG_CONFIG, MSG_SELECT_MON, MSG_MON_CHANGED,
     MSG_CLIPBOARD, MSG_AUDIO_CFG,
+    MSG_FILE_SEND_REQ, MSG_FILE_SEND_ACK, MSG_FILE_CHUNK,
+    MSG_FILE_DONE, MSG_FILE_ABORT, MSG_FILE_BROWSE,
+    MSG_FILE_LIST, MSG_FILE_GET_REQ, MSG_FILE_GET_INFO,
+    MSG_CHAT,
 )
 from host.screen_capture import ScreenCapture
 from host.input_handler import InputHandler
 from host.audio_capture import AudioCapture
 
 logger = logging.getLogger(__name__)
+
+
+# ── File helpers ──────────────────────────────────────────────────────────────
+
+def _upload_dir() -> str:
+    """Directory where uploaded files are saved on the host."""
+    if sys.platform == 'win32':
+        base = os.path.join(os.path.expanduser('~'), 'Desktop', 'EcranDistant')
+    else:
+        base = os.path.join(os.path.expanduser('~'), 'EcranDistant')
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def _scan_dir(path: str) -> tuple:
+    """Return (path, parent, entries) for a directory (blocking I/O)."""
+    entries = []
+    resolved = os.path.realpath(path) if path else os.path.expanduser('~')
+    parent_p = str(Path(resolved).parent)
+    parent   = '' if parent_p == resolved else parent_p
+    try:
+        for e in sorted(os.scandir(resolved),
+                        key=lambda x: (not x.is_dir(), x.name.lower())):
+            try:
+                st = e.stat()
+                entries.append({
+                    'name':   e.name,
+                    'is_dir': e.is_dir(),
+                    'size':   0 if e.is_dir() else st.st_size,
+                })
+            except OSError:
+                pass
+    except Exception as exc:
+        logger.warning('[File] scan %s: %s', resolved, exc)
+    return resolved, parent, entries
+
+
+async def _send_file(ws, tid: int, path: str):
+    """Send a file to client in chunks (64 KB each)."""
+    CHUNK = 65536
+    loop  = asyncio.get_running_loop()
+    try:
+        size = os.path.getsize(path)
+        name = os.path.basename(path)
+        await ws.send(encode_json(MSG_FILE_GET_INFO, {'id': tid, 'name': name, 'size': size}))
+        with open(path, 'rb') as f:
+            while True:
+                chunk = await loop.run_in_executor(None, f.read, CHUNK)
+                if not chunk:
+                    break
+                await ws.send(encode_file_chunk(tid, chunk))
+        await ws.send(encode_json(MSG_FILE_DONE, {'id': tid, 'name': name}))
+        logger.info('[File] Sent %s (%d bytes)', path, size)
+    except Exception as exc:
+        logger.warning('[File] send error %s: %s', path, exc)
+        try:
+            await ws.send(encode_json(MSG_FILE_ABORT, {'id': tid, 'reason': str(exc)}))
+        except Exception:
+            pass
 
 
 # ── Frame streaming ────────────────────────────────────────────────────────────
@@ -82,6 +150,8 @@ async def _recv_input(
     audio_enabled: asyncio.Event,
     clip_state: dict,
     clip_enabled: asyncio.Event,
+    file_transfers: dict,
+    chat_cb,          # async callable(text, sender)
 ):
     loop = asyncio.get_running_loop()
     async for data in ws:
@@ -153,6 +223,64 @@ async def _recv_input(
                 else:
                     audio_enabled.clear()
 
+            # ── Chat ───────────────────────────────────────────────────────
+            elif t == MSG_CHAT:
+                text = msg.get('text', '').strip()
+                if text:
+                    await chat_cb(text, 'client')
+
+            # ── File: upload request (client → host) ───────────────────────
+            elif t == MSG_FILE_SEND_REQ:
+                tid  = msg.get('id', 0)
+                name = os.path.basename(msg.get('name', 'file')).strip() or 'file'
+                size = int(msg.get('size', 0))
+                dest = os.path.join(_upload_dir(), name)
+                try:
+                    fobj = open(dest, 'wb')
+                    file_transfers[tid] = {'path': dest, 'f': fobj, 'size': size}
+                    await ws.send(encode_json(MSG_FILE_SEND_ACK, {'id': tid, 'ok': True}))
+                    logger.info('[File] Receiving %s (%d B) → %s', name, size, dest)
+                except Exception as exc:
+                    await ws.send(encode_json(MSG_FILE_SEND_ACK,
+                                              {'id': tid, 'ok': False, 'reason': str(exc)}))
+
+            elif msg.get('type') == 'file_chunk':
+                tid = msg['id']
+                if tid in file_transfers:
+                    file_transfers[tid]['f'].write(msg['data'])
+
+            elif t == MSG_FILE_DONE and msg.get('id') in file_transfers:
+                tid = msg['id']
+                ft  = file_transfers.pop(tid)
+                ft['f'].close()
+                logger.info('[File] Upload complete: %s', ft['path'])
+
+            elif t == MSG_FILE_ABORT and msg.get('id') in file_transfers:
+                tid = msg['id']
+                ft  = file_transfers.pop(tid)
+                ft['f'].close()
+                try:
+                    os.unlink(ft['path'])
+                except OSError:
+                    pass
+
+            # ── File: browse host FS ───────────────────────────────────────
+            elif t == MSG_FILE_BROWSE:
+                tid  = msg.get('id', 0)
+                path = msg.get('path', '')
+                rpath, parent, entries = await loop.run_in_executor(
+                    None, _scan_dir, path
+                )
+                await ws.send(encode_json(MSG_FILE_LIST, {
+                    'id': tid, 'path': rpath, 'parent': parent, 'entries': entries,
+                }))
+
+            # ── File: download request (host → client) ─────────────────────
+            elif t == MSG_FILE_GET_REQ:
+                tid  = msg.get('id', 0)
+                path = msg.get('path', '')
+                asyncio.create_task(_send_file(ws, tid, path))
+
         except Exception as exc:
             logger.debug('Input error: %s', exc)
 
@@ -166,6 +294,8 @@ async def run_host_session(
     handler: InputHandler,
     fps: int,
     audio_cap: AudioCapture | None = None,
+    on_chat_recv=None,      # optional: sync callable(text, sender)
+    chat_out_queue=None,    # optional: asyncio.Queue for host→client chat
 ):
     """Works over a direct WebSocket or a relayed one."""
 
@@ -192,17 +322,37 @@ async def run_host_session(
     logger.info('Client authenticated — session started')
 
     # ── Shared state ───────────────────────────────────────────────────────
-    fps_ref       = [fps]
-    audio_enabled = asyncio.Event()
-    clip_enabled  = asyncio.Event()
-    clip_enabled.set()            # clipboard sync on by default
-    clip_state    = {'last_sent': '', 'last_received': ''}
+    fps_ref        = [fps]
+    audio_enabled  = asyncio.Event()
+    clip_enabled   = asyncio.Event()
+    clip_enabled.set()
+    clip_state     = {'last_sent': '', 'last_received': ''}
+    file_transfers = {}   # tid → {path, f, size}
+    chat_queue     = asyncio.Queue()   # outgoing chat messages (host → client)
+
+    async def _chat_cb(text: str, sender: str):
+        """Called when a chat message is received from client."""
+        # Notify host-side GUI (sync callback, safe from async context)
+        if on_chat_recv:
+            on_chat_recv(text, sender)
+
+    async def _chat_sender():
+        """Forward queued host→client chat messages."""
+        q = chat_out_queue if chat_out_queue is not None else chat_queue
+        while True:
+            item = await q.get()
+            try:
+                await ws.send(encode_json(MSG_CHAT, item))
+            except Exception:
+                break
 
     # ── Run all coroutines concurrently ────────────────────────────────────
     tasks = [
         _send_frames(ws, capture, fps_ref),
-        _recv_input(ws, handler, capture, fps_ref, audio_enabled, clip_state, clip_enabled),
+        _recv_input(ws, handler, capture, fps_ref, audio_enabled,
+                    clip_state, clip_enabled, file_transfers, _chat_cb),
         _sync_clipboard(ws, clip_state, clip_enabled),
+        _chat_sender(),
     ]
     if audio_cap and audio_cap.available:
         tasks.append(_send_audio(ws, audio_cap, audio_enabled))
@@ -211,6 +361,13 @@ async def run_host_session(
         await asyncio.gather(*tasks)
     except websockets.exceptions.ConnectionClosed:
         pass
+    finally:
+        # Close any open upload file handles
+        for ft in file_transfers.values():
+            try:
+                ft['f'].close()
+            except Exception:
+                pass
 
 
 # ── SSL helper ─────────────────────────────────────────────────────────────────
