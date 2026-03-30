@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="EcranDistant">
+<title>EcranDistant</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{background:#1e1e2e;color:#cdd6f4;font-family:'Segoe UI',sans-serif;height:100dvh;overflow:hidden}
+
+/* ── Connect screen ── */
+#connect{display:flex;flex-direction:column;align-items:center;justify-content:center;
+  height:100dvh;padding:24px;gap:14px}
+#connect h1{font-size:26px;color:#89b4fa;font-weight:700;margin-bottom:6px}
+#connect p{color:#6c7086;font-size:13px;text-align:center}
+.card{background:#181825;border:1px solid #313244;border-radius:12px;
+  padding:20px;width:100%;max-width:400px;display:flex;flex-direction:column;gap:12px}
+label{font-size:12px;color:#6c7086;margin-bottom:2px;display:block}
+input{background:#313244;border:1px solid #45475a;border-radius:8px;
+  padding:10px 14px;color:#cdd6f4;font-size:15px;width:100%;outline:none}
+input:focus{border-color:#89b4fa}
+.btn{border:none;border-radius:8px;padding:12px;font-size:15px;
+  font-weight:600;cursor:pointer;width:100%;transition:.15s}
+.btn-primary{background:#89b4fa;color:#1e1e2e}
+.btn-primary:active{background:#b4d0fb}
+.btn-danger{background:#f38ba8;color:#1e1e2e}
+#status-msg{font-size:13px;color:#f9e2af;text-align:center;min-height:18px}
+
+/* ── Viewer screen ── */
+#viewer{display:none;flex-direction:column;height:100dvh}
+#toolbar{display:flex;align-items:center;gap:8px;padding:6px 10px;
+  background:#181825;border-bottom:1px solid #313244;flex-shrink:0;overflow-x:auto}
+.tbtn{background:#313244;border:none;border-radius:6px;color:#cdd6f4;
+  padding:6px 12px;font-size:13px;cursor:pointer;white-space:nowrap;flex-shrink:0}
+.tbtn:active{background:#585b70}
+.tbtn.active{background:#89b4fa;color:#1e1e2e}
+#canvas-wrap{flex:1;overflow:hidden;position:relative;background:#000;
+  display:flex;align-items:center;justify-content:center}
+#screen{max-width:100%;max-height:100%;object-fit:contain;touch-action:none;display:block}
+#kbd-input{position:fixed;left:-9999px;top:0;opacity:0;width:1px;height:1px}
+#audio-banner{position:fixed;bottom:60px;left:50%;transform:translateX(-50%);
+  background:#313244;border-radius:20px;padding:8px 16px;font-size:13px;
+  color:#f9e2af;display:none;z-index:99}
+</style>
+</head>
+<body>
+
+<!-- ══ CONNECT SCREEN ══════════════════════════════════════════════════ -->
+<div id="connect">
+  <h1>🖥 EcranDistant</h1>
+  <p>Contrôlez votre PC depuis votre téléphone</p>
+
+  <div class="card">
+    <div>
+      <label>Relay URL</label>
+      <input id="relay-url" value="ecrandistant-relay.onrender.com" placeholder="relay URL">
+    </div>
+    <div>
+      <label>Session ID</label>
+      <input id="session-id" placeholder="ex: ABC123" autocapitalize="characters" style="letter-spacing:4px;font-size:20px;font-weight:700;text-align:center">
+    </div>
+    <div>
+      <label>Mot de passe</label>
+      <input id="password" type="password" placeholder="6 chiffres" inputmode="numeric">
+    </div>
+    <button class="btn btn-primary" onclick="connect()">🔌 Connecter</button>
+    <div id="status-msg"></div>
+  </div>
+</div>
+
+<!-- ══ VIEWER SCREEN ══════════════════════════════════════════════════ -->
+<div id="viewer">
+  <div id="toolbar">
+    <button class="tbtn" onclick="disconnect()">⏹ Quitter</button>
+    <button class="tbtn" id="btn-kbd" onclick="toggleKbd()">⌨️ Clavier</button>
+    <button class="tbtn" id="btn-audio" onclick="toggleAudio()">🔇 Son</button>
+    <button class="tbtn" onclick="sendCtrlAltDel()">⚡ Ctrl+Alt+Del</button>
+    <button class="tbtn" onclick="sendKey('win')">🪟 Win</button>
+    <span id="fps-label" style="color:#6c7086;font-size:12px;margin-left:auto">--fps</span>
+  </div>
+  <div id="canvas-wrap">
+    <canvas id="screen"></canvas>
+  </div>
+  <div id="audio-banner">🔊 Tap pour activer le son</div>
+</div>
+
+<!-- Hidden keyboard input -->
+<input id="kbd-input" type="text" autocomplete="off" autocorrect="off"
+       autocapitalize="off" spellcheck="false">
+
+<script>
+// ── Constants ──────────────────────────────────────────────────────────
+const MSG_FRAME=0x01,MSG_MOUSE=0x02,MSG_KEY=0x03,MSG_AUTH=0x04,
+      MSG_AUTH_OK=0x05,MSG_AUTH_FAIL=0x06,MSG_PING=0x07,MSG_PONG=0x08,
+      MSG_CONFIG=0x09,MSG_SELECT_MON=0x0A,MSG_MON_CHANGED=0x0B,
+      MSG_CLIPBOARD=0x0C,MSG_AUDIO_CFG=0x0D,MSG_AUDIO=0x13;
+
+// ── State ──────────────────────────────────────────────────────────────
+let ws=null, remoteW=1920, remoteH=1080;
+let audioEnabled=false, audioCtx=null, audioQueue=[], audioPlaying=false;
+let audioSR=48000, audioCH=2, audioNode=null;
+let frameCount=0, lastFpsT=Date.now();
+const enc=new TextEncoder(), dec=new TextDecoder();
+
+// ── Protocol ──────────────────────────────────────────────────────────
+function encodeJson(type, payload){
+  const j=enc.encode(JSON.stringify(payload));
+  const b=new Uint8Array(1+j.length);
+  b[0]=type; b.set(j,1);
+  return b.buffer;
+}
+
+function decodeMsg(buf){
+  const b=new Uint8Array(buf);
+  const t=b[0];
+  if(t===MSG_FRAME){
+    const w=(b[1]<<8)|b[2], h=(b[3]<<8)|b[4];
+    return {_t:'frame',w,h,jpeg:b.slice(5)};
+  }
+  if(t===MSG_AUDIO){
+    const sr=(b[1]<<8)|b[2], ch=b[3];
+    const pcm=pako.inflate(b.slice(4));
+    return {_t:'audio',sr,ch,pcm};
+  }
+  try{
+    const p=JSON.parse(dec.decode(b.slice(1)));
+    p._mt=t; return p;
+  }catch(e){return {_mt:t};}
+}
+
+// ── Connect ───────────────────────────────────────────────────────────
+function setStatus(msg){document.getElementById('status-msg').textContent=msg;}
+
+async function connect(){
+  let relay=document.getElementById('relay-url').value.trim();
+  const sid=document.getElementById('session-id').value.trim().toUpperCase();
+  const pwd=document.getElementById('password').value.trim();
+  if(!relay||!sid||!pwd){setStatus('⚠ Remplissez tous les champs.');return;}
+
+  // Fix scheme
+  if(relay.startsWith('https://'))relay='wss://'+relay.slice(8);
+  else if(relay.startsWith('http://'))relay='ws://'+relay.slice(7);
+  else if(!relay.startsWith('ws'))relay='wss://'+relay;
+
+  setStatus('🔄 Connexion au relay…');
+
+  try{
+    ws=new WebSocket(relay);
+    ws.binaryType='arraybuffer';
+
+    await new Promise((ok,fail)=>{
+      const t=setTimeout(()=>fail(new Error('Timeout relay')),20000);
+      ws.onopen=()=>{clearTimeout(t);ok();};
+      ws.onerror=()=>{clearTimeout(t);fail(new Error('Erreur réseau'));};
+    });
+
+    // Join relay session
+    ws.send(JSON.stringify({role:'client',session_id:sid}));
+    setStatus('🔄 Rejoint la session…');
+
+    const relayResp=await recvJson();
+    if(relayResp.type==='error'){setStatus('❌ '+relayResp.reason);ws.close();return;}
+    // type === 'joined'
+
+    // Auth
+    setStatus('🔐 Authentification…');
+    ws.send(encodeJson(MSG_AUTH,{password:pwd}));
+
+    const authResp=await recvBin();
+    if(authResp._mt===MSG_AUTH_FAIL){setStatus('❌ Mauvais mot de passe.');ws.close();return;}
+    if(authResp._mt!==MSG_AUTH_OK){setStatus('❌ Réponse inattendue.');ws.close();return;}
+
+    remoteW=authResp.width||1920;
+    remoteH=authResp.height||1080;
+
+    // Switch to viewer
+    document.getElementById('connect').style.display='none';
+    document.getElementById('viewer').style.display='flex';
+
+    // Show audio banner
+    if(authResp.audio){
+      document.getElementById('audio-banner').style.display='block';
+      setTimeout(()=>document.getElementById('audio-banner').style.display='none',4000);
+    }
+
+    // Start session loop
+    ws.onmessage=onMessage;
+    ws.onclose=()=>showConnect('🔌 Déconnecté');
+    ws.onerror=()=>showConnect('❌ Erreur réseau');
+
+    // FPS counter
+    setInterval(updateFps,1000);
+
+  }catch(e){
+    setStatus('❌ '+e.message);
+    if(ws)ws.close();
+  }
+}
+
+function recvJson(){
+  return new Promise((ok,fail)=>{
+    const t=setTimeout(()=>fail(new Error('Timeout')),15000);
+    ws.onmessage=e=>{
+      clearTimeout(t);
+      ws.onmessage=null;
+      try{ok(JSON.parse(e.data));}catch(ex){fail(ex);}
+    };
+  });
+}
+function recvBin(){
+  return new Promise((ok,fail)=>{
+    const t=setTimeout(()=>fail(new Error('Timeout auth')),15000);
+    ws.onmessage=e=>{
+      clearTimeout(t);
+      ws.onmessage=null;
+      if(e.data instanceof ArrayBuffer)ok(decodeMsg(e.data));
+      else{try{ok(JSON.parse(e.data));}catch(ex){fail(ex);}}
+    };
+  });
+}
+
+// ── Message handler ───────────────────────────────────────────────────
+const canvas=document.getElementById('screen');
+const ctx=canvas.getContext('2d');
+
+function onMessage(e){
+  if(!(e.data instanceof ArrayBuffer))return;
+  const msg=decodeMsg(e.data);
+
+  if(msg._t==='frame'){
+    renderFrame(msg.jpeg);
+    frameCount++;
+  } else if(msg._t==='audio'){
+    if(audioEnabled)playAudioChunk(msg);
+  } else if(msg._mt===MSG_PONG){
+    // pong ok
+  }
+}
+
+// ── Render ────────────────────────────────────────────────────────────
+function renderFrame(jpeg){
+  const blob=new Blob([jpeg],{type:'image/jpeg'});
+  const url=URL.createObjectURL(blob);
+  const img=new Image();
+  img.onload=()=>{
+    if(canvas.width!==img.width)canvas.width=img.width;
+    if(canvas.height!==img.height)canvas.height=img.height;
+    ctx.drawImage(img,0,0);
+    URL.revokeObjectURL(url);
+  };
+  img.src=url;
+}
+
+function updateFps(){
+  const now=Date.now();
+  const fps=Math.round(frameCount*1000/(now-lastFpsT));
+  document.getElementById('fps-label').textContent=fps+'fps';
+  frameCount=0; lastFpsT=now;
+}
+
+// ── Touch → Mouse ─────────────────────────────────────────────────────
+let lastTouchX=0,lastTouchY=0,touchStartX=0,touchStartY=0,touchMoved=false;
+
+function getRemote(touch){
+  const r=canvas.getBoundingClientRect();
+  const scaleX=remoteW/r.width, scaleY=remoteH/r.height;
+  return{
+    x:Math.round((touch.clientX-r.left)*scaleX),
+    y:Math.round((touch.clientY-r.top)*scaleY)
+  };
+}
+
+function sendMouse(ev,x,y,btn='left',pressed=true){
+  if(!ws||ws.readyState!==1)return;
+  ws.send(encodeJson(MSG_MOUSE,{event:ev,x,y,button:btn,pressed}));
+}
+
+canvas.addEventListener('touchstart',e=>{
+  e.preventDefault();
+  const t=e.touches[0];
+  const {x,y}=getRemote(t);
+  touchStartX=t.clientX; touchStartY=t.clientY;
+  lastTouchX=x; lastTouchY=y;
+  touchMoved=false;
+  sendMouse('move',x,y);
+},{passive:false});
+
+canvas.addEventListener('touchmove',e=>{
+  e.preventDefault();
+  const t=e.touches[0];
+  const {x,y}=getRemote(t);
+  const dx=t.clientX-touchStartX, dy=t.clientY-touchStartY;
+  if(Math.abs(dx)>5||Math.abs(dy)>5)touchMoved=true;
+  lastTouchX=x; lastTouchY=y;
+  sendMouse('move',x,y);
+},{passive:false});
+
+canvas.addEventListener('touchend',e=>{
+  e.preventDefault();
+  if(!touchMoved){
+    sendMouse('click',lastTouchX,lastTouchY,'left',true);
+    setTimeout(()=>sendMouse('click',lastTouchX,lastTouchY,'left',false),80);
+  }
+},{passive:false});
+
+// Long press = right click
+let longPressTimer=null;
+canvas.addEventListener('touchstart',e=>{
+  longPressTimer=setTimeout(()=>{
+    const t=e.touches[0];
+    const {x,y}=getRemote(t);
+    sendMouse('click',x,y,'right',true);
+    setTimeout(()=>sendMouse('click',x,y,'right',false),80);
+    if(navigator.vibrate)navigator.vibrate(40);
+  },600);
+},{passive:false});
+canvas.addEventListener('touchend',()=>clearTimeout(longPressTimer),{passive:false});
+canvas.addEventListener('touchmove',()=>clearTimeout(longPressTimer),{passive:false});
+
+// Two-finger scroll
+let lastPinchDist=0;
+canvas.addEventListener('touchmove',e=>{
+  if(e.touches.length===2){
+    e.preventDefault();
+    const t1=e.touches[0],t2=e.touches[1];
+    const cx=(getRemote(t1).x+getRemote(t2).x)/2;
+    const cy=(getRemote(t1).y+getRemote(t2).y)/2;
+    const dist=Math.hypot(t2.clientX-t1.clientX,t2.clientY-t1.clientY);
+    if(lastPinchDist){
+      const dy=dist-lastPinchDist;
+      if(Math.abs(dy)>3)
+        ws.send(encodeJson(MSG_MOUSE,{event:'scroll',x:Math.round(cx),y:Math.round(cy),dx:0,dy:Math.round(dy/10)}));
+    }
+    lastPinchDist=dist;
+  }
+},{passive:false});
+canvas.addEventListener('touchend',()=>{lastPinchDist=0;},{passive:false});
+
+// ── Keyboard ──────────────────────────────────────────────────────────
+const kbdInput=document.getElementById('kbd-input');
+let kbdPrev='';
+
+function toggleKbd(){
+  const btn=document.getElementById('btn-kbd');
+  if(document.activeElement===kbdInput){
+    kbdInput.blur();
+    btn.classList.remove('active');
+  } else {
+    kbdInput.value='x'; kbdPrev='x';
+    kbdInput.focus();
+    btn.classList.add('active');
+  }
+}
+
+kbdInput.addEventListener('keydown',e=>{
+  if(!ws||ws.readyState!==1)return;
+  const map={
+    Enter:'enter',Backspace:'backspace',Tab:'tab',Escape:'escape',
+    Delete:'delete',ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',
+    ArrowRight:'right',Home:'home',End:'end',PageUp:'page_up',
+    PageDown:'page_down',F1:'f1',F2:'f2',F3:'f3',F4:'f4',F5:'f5',
+    F6:'f6',F7:'f7',F8:'f8',F9:'f9',F10:'f10',F11:'f11',F12:'f12',
+    Control:'ctrl',Alt:'alt',Shift:'shift',Meta:'win',CapsLock:'caps_lock',
+  };
+  const key=map[e.key]||(e.key.length===1?e.key:null);
+  if(!key)return;
+  ws.send(encodeJson(MSG_KEY,{event:'press',key}));
+  setTimeout(()=>ws.send(encodeJson(MSG_KEY,{event:'release',key})),50);
+});
+
+kbdInput.addEventListener('input',e=>{
+  const cur=kbdInput.value;
+  if(cur.length>kbdPrev.length){
+    const ch=cur.slice(kbdPrev.length);
+    for(const c of ch){
+      if(c&&c!=='x'||kbdPrev==='x'){
+        const key=c==='x'&&kbdPrev==='x'?'backspace':c;
+        if(key!=='x'){
+          ws.send(encodeJson(MSG_KEY,{event:'press',key}));
+          setTimeout(()=>ws.send(encodeJson(MSG_KEY,{event:'release',key})),50);
+        }
+      }
+    }
+  } else if(cur.length<kbdPrev.length){
+    ws.send(encodeJson(MSG_KEY,{event:'press',key:'backspace'}));
+    setTimeout(()=>ws.send(encodeJson(MSG_KEY,{event:'release',key:'backspace'})),50);
+  }
+  kbdInput.value='x'; kbdPrev='x';
+});
+
+// ── Audio ─────────────────────────────────────────────────────────────
+function toggleAudio(){
+  audioEnabled=!audioEnabled;
+  const btn=document.getElementById('btn-audio');
+  btn.textContent=audioEnabled?'🔊 Son':'🔇 Son';
+  btn.classList.toggle('active',audioEnabled);
+  if(ws&&ws.readyState===1)
+    ws.send(encodeJson(MSG_AUDIO_CFG,{enabled:audioEnabled}));
+  if(audioEnabled&&!audioCtx){
+    audioCtx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:audioSR});
+  }
+}
+
+let nextAudioTime=0;
+function playAudioChunk(msg){
+  if(!audioCtx)return;
+  try{
+    const pcm=new Int16Array(msg.pcm.buffer);
+    const ch=msg.ch||1;
+    const frames=pcm.length/ch;
+    const buf=audioCtx.createBuffer(ch,frames,msg.sr||48000);
+    for(let c=0;c<ch;c++){
+      const data=buf.getChannelData(c);
+      for(let i=0;i<frames;i++)
+        data[i]=pcm[i*ch+c]/32768;
+    }
+    const src=audioCtx.createBufferSource();
+    src.buffer=buf;
+    src.connect(audioCtx.destination);
+    const now=audioCtx.currentTime;
+    if(nextAudioTime<now)nextAudioTime=now+0.05;
+    src.start(nextAudioTime);
+    nextAudioTime+=buf.duration;
+  }catch(e){}
+}
+
+// ── Controls ──────────────────────────────────────────────────────────
+function sendCtrlAltDel(){
+  if(!ws||ws.readyState!==1)return;
+  ['ctrl','alt','delete'].forEach(k=>ws.send(encodeJson(MSG_KEY,{event:'press',key:k})));
+  setTimeout(()=>
+    ['ctrl','alt','delete'].forEach(k=>ws.send(encodeJson(MSG_KEY,{event:'release',key:k}))),100);
+}
+
+function sendKey(k){
+  if(!ws||ws.readyState!==1)return;
+  ws.send(encodeJson(MSG_KEY,{event:'press',key:k}));
+  setTimeout(()=>ws.send(encodeJson(MSG_KEY,{event:'release',key:k})),80);
+}
+
+function disconnect(){
+  if(ws)ws.close();
+  showConnect('');
+}
+
+function showConnect(msg){
+  document.getElementById('viewer').style.display='none';
+  document.getElementById('connect').style.display='flex';
+  setStatus(msg);
+  audioEnabled=false;
+  if(audioCtx){audioCtx.close();audioCtx=null;}
+  nextAudioTime=0;
+}
+</script>
+</body>
+</html>

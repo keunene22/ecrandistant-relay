@@ -159,12 +159,25 @@ async def root_handler(request):
     return web.Response(text="EcranDistant Relay OK\n")
 
 
+async def client_page_handler(request):
+    """Serve the web client HTML page."""
+    import os
+    html_path = os.path.join(os.path.dirname(__file__), '..', 'webclient', 'index.html')
+    try:
+        with open(html_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        return web.Response(text=content, content_type='text/html')
+    except FileNotFoundError:
+        return web.Response(text='Web client not found.', status=404)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 async def start(host: str = '0.0.0.0', port: int = 9000):
     app = web.Application(client_max_size=20 * 1024 * 1024)  # 20 MB max message
-    app.router.add_route('*', '/',       root_handler)
-    app.router.add_route('*', '/health', root_handler)
+    app.router.add_route('*', '/',        root_handler)
+    app.router.add_route('*', '/health',  root_handler)
+    app.router.add_route('GET', '/client', client_page_handler)
 
     runner = web.AppRunner(app)
     await runner.setup()
