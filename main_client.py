@@ -44,8 +44,8 @@ class ConnectDialog(QDialog):
         # Page 1: Relay
         p1 = QWidget()
         f1 = QFormLayout(p1)
-        self._relay_edit = QLineEdit('ecrandistant-relay.onrender.com')
-        self._relay_edit.setPlaceholderText('ecrandistant-relay.onrender.com')
+        self._relay_edit = QLineEdit('wss://api.194.163.188.237.nip.io/relay')
+        self._relay_edit.setPlaceholderText('wss://api.194.163.188.237.nip.io/relay')
         self._sid_edit = QLineEdit()
         self._sid_edit.setPlaceholderText('6-character code from host')
         f1.addRow('Relay URL:',  self._relay_edit)

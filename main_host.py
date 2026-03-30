@@ -170,8 +170,7 @@ class HostWorker(QThread):
             try:
                 async with websockets.connect(
                     self.relay_url,
-                    ping_interval=15,
-                    ping_timeout=30,
+                    ping_interval=None,
                     open_timeout=30,
                 ) as ws:
                     await ws.send(json.dumps({'role': 'host'}))
@@ -329,7 +328,7 @@ class HostWindow(QWidget):
         lay.setSpacing(14)
 
         lay.addWidget(QLabel('🌐  Mode Relay — URL du serveur relay :'))
-        self._relay_edit = QLineEdit('ecrandistant-relay.onrender.com')
+        self._relay_edit = QLineEdit('wss://api.194.163.188.237.nip.io/relay')
         lay.addWidget(self._relay_edit)
 
         row = QHBoxLayout()

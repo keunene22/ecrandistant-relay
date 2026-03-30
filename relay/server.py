@@ -126,7 +126,7 @@ async def _client_session(ws, session_id: str):
 
 async def root_handler(request):
     if request.headers.get('Upgrade', '').lower() == 'websocket':
-        ws = web.WebSocketResponse(heartbeat=25, receive_timeout=120)
+        ws = web.WebSocketResponse(heartbeat=None, receive_timeout=None)
         await ws.prepare(request)
 
         try:
