@@ -269,12 +269,14 @@ async def _recv_input(
             elif msg.get('type') == 'file_chunk':
                 tid = msg['id']
                 if tid in file_transfers:
-                    file_transfers[tid]['f'].write(msg['data'])
+                    chunk = bytes(msg['data'])
+                    await loop.run_in_executor(
+                        None, file_transfers[tid]['f'].write, chunk)
 
             elif t == MSG_FILE_DONE and msg.get('id') in file_transfers:
                 tid = msg['id']
                 ft  = file_transfers.pop(tid)
-                ft['f'].close()
+                await loop.run_in_executor(None, ft['f'].close)
                 logger.info('[File] Upload complete: %s', ft['path'])
 
             elif t == MSG_FILE_ABORT and msg.get('id') in file_transfers:
