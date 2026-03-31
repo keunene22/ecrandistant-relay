@@ -254,36 +254,61 @@ async def _recv_input(
             # ── File: upload request (client → host) ───────────────────────
             elif t == MSG_FILE_SEND_REQ:
                 tid  = msg.get('id', 0)
-                name = os.path.basename(msg.get('name', 'file')).strip() or 'file'
+                raw_name = msg.get('name', 'file') or 'file'
+                # Sanitise le nom : retire les caractères interdits sur Windows
+                safe_name = os.path.basename(raw_name).strip()
+                for ch in r'\/:*?"<>|':
+                    safe_name = safe_name.replace(ch, '_')
+                safe_name = safe_name or 'file'
                 size = int(msg.get('size', 0))
-                dest = os.path.join(_upload_dir(), name)
+                dest = os.path.join(_upload_dir(), safe_name)
                 try:
                     fobj = open(dest, 'wb')
                     file_transfers[tid] = {'path': dest, 'f': fobj, 'size': size}
                     await ws.send(encode_json(MSG_FILE_SEND_ACK, {'id': tid, 'ok': True}))
-                    logger.info('[File] Receiving %s (%d B) → %s', name, size, dest)
+                    logger.info('[File] Receiving %s (%d B) → %s', safe_name, size, dest)
                 except Exception as exc:
-                    await ws.send(encode_json(MSG_FILE_SEND_ACK,
-                                              {'id': tid, 'ok': False, 'reason': str(exc)}))
+                    logger.warning('[File] Cannot create file %s: %s', dest, exc)
+                    try:
+                        await ws.send(encode_json(MSG_FILE_SEND_ACK,
+                                                  {'id': tid, 'ok': False, 'reason': str(exc)}))
+                    except Exception:
+                        pass
 
             elif msg.get('type') == 'file_chunk':
                 tid = msg['id']
-                if tid in file_transfers:
-                    chunk = bytes(msg['data'])
-                    await loop.run_in_executor(
-                        None, file_transfers[tid]['f'].write, chunk)
+                ft  = file_transfers.get(tid)
+                if ft:
+                    try:
+                        chunk = bytes(msg['data'])
+                        await loop.run_in_executor(None, ft['f'].write, chunk)
+                    except Exception as exc:
+                        logger.warning('[File] Write error tid=%s: %s', tid, exc)
+                        file_transfers.pop(tid, None)
+                        try:
+                            ft['f'].close()
+                        except Exception:
+                            pass
+                        try:
+                            await ws.send(encode_json(MSG_FILE_ABORT,
+                                                      {'id': tid, 'reason': 'Erreur écriture : '+str(exc)}))
+                        except Exception:
+                            pass
 
             elif t == MSG_FILE_DONE and msg.get('id') in file_transfers:
                 tid = msg['id']
                 ft  = file_transfers.pop(tid)
-                await loop.run_in_executor(None, ft['f'].close)
-                logger.info('[File] Upload complete: %s', ft['path'])
+                try:
+                    await loop.run_in_executor(None, ft['f'].close)
+                    logger.info('[File] Upload complete: %s', ft['path'])
+                except Exception as exc:
+                    logger.warning('[File] Close error: %s', exc)
 
             elif t == MSG_FILE_ABORT and msg.get('id') in file_transfers:
                 tid = msg['id']
                 ft  = file_transfers.pop(tid)
-                ft['f'].close()
                 try:
+                    ft['f'].close()
                     os.unlink(ft['path'])
                 except OSError:
                     pass

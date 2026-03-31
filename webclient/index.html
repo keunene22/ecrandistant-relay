@@ -297,6 +297,11 @@ async function connect(){
     remoteW=authResp.width||1920;
     remoteH=authResp.height||1080;
 
+    // Sauvegarde les infos pour reconnexion rapide
+    sessionStorage.setItem('lastSid', sid);
+    sessionStorage.setItem('lastPwd', pwd);
+    sessionStorage.setItem('lastRelay', relay);
+
     // Switch to viewer
     document.getElementById('connect').style.display='none';
     document.getElementById('viewer').style.display='flex';
@@ -309,8 +314,14 @@ async function connect(){
 
     // Start session loop
     ws.onmessage=onMessage;
-    ws.onclose=()=>showConnect('🔌 Déconnecté — entre le code affiché sur le PC pour reprendre');
-    ws.onerror=()=>showConnect('❌ Erreur réseau');
+    ws.onclose=()=>{
+      const msg=fileUploadId
+        ?'⚠️ Transfert interrompu — session déconnectée. Reconnecte-toi avec le même code.'
+        :'🔌 Déconnecté — entre le code affiché sur le PC pour reprendre';
+      fileUploadId=null;
+      showConnect(msg);
+    };
+    ws.onerror=()=>{fileUploadId=null;showConnect('❌ Erreur réseau');};
 
     // FPS counter
     setInterval(updateFps,1000);
@@ -863,6 +874,13 @@ function showConnect(msg){
   document.getElementById('viewer').style.display='none';
   document.getElementById('connect').style.display='flex';
   setStatus(msg);
+  // Pré-remplit les champs avec la dernière session
+  const lastSid=sessionStorage.getItem('lastSid');
+  const lastPwd=sessionStorage.getItem('lastPwd');
+  const lastRelay=sessionStorage.getItem('lastRelay');
+  if(lastSid)document.getElementById('session-id').value=lastSid;
+  if(lastPwd)document.getElementById('password').value=lastPwd;
+  if(lastRelay)document.getElementById('relay-url').value=lastRelay;
   audioEnabled=false;
   if(audioCtx){audioCtx.close();audioCtx=null;}
   nextAudioTime=0;
