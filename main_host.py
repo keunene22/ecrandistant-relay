@@ -180,9 +180,17 @@ class HostWorker(QThread):
                     open_timeout=30,
                 ) as ws:
                     await ws.send(json.dumps({'role': 'host'}))
-                    resp = json.loads(await ws.recv())
-                    if resp.get('type') != 'registered':
-                        raise RuntimeError(resp.get('reason', str(resp)))
+                    # Attendre 'registered' en ignorant les heartbeats éventuels
+                    while True:
+                        resp = json.loads(await ws.recv())
+                        t = resp.get('type')
+                        if t == 'registered':
+                            break
+                        elif t == 'heartbeat':
+                            await ws.send(json.dumps({'type': 'heartbeat_ack'}))
+                        elif t == 'error':
+                            raise RuntimeError(resp.get('reason', str(resp)))
+                        # Ignorer les autres messages inattendus
 
                     sid = resp['session_id']
                     self.session_ready.emit(sid)
