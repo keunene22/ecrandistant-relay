@@ -35,6 +35,28 @@ from host.audio_capture import AudioCapture
 logger = logging.getLogger(__name__)
 
 
+# ── Thread-safe WebSocket wrapper ────────────────────────────────────────────
+
+class _LockedWS:
+    """Wraps a websockets connection so concurrent sends are serialised."""
+    def __init__(self, ws):
+        self._ws   = ws
+        self._lock = asyncio.Lock()
+
+    async def send(self, data):
+        async with self._lock:
+            await self._ws.send(data)
+
+    def __getattr__(self, name):
+        return getattr(self._ws, name)
+
+    def __aiter__(self):
+        return self._ws.__aiter__()
+
+    async def __anext__(self):
+        return await self._ws.__anext__()
+
+
 # ── File helpers ──────────────────────────────────────────────────────────────
 
 def _upload_dir() -> str:
@@ -298,6 +320,7 @@ async def run_host_session(
     chat_out_queue=None,    # optional: asyncio.Queue for host→client chat
 ):
     """Works over a direct WebSocket or a relayed one."""
+    ws = _LockedWS(ws)   # sérialise tous les ws.send() concurrents
 
     # ── Auth ───────────────────────────────────────────────────────────────
     try:
