@@ -159,7 +159,7 @@ input:focus{border-color:#89b4fa}
     <div id="upload-area" onclick="document.getElementById('file-input').click()">
       📂  Appuyez pour choisir un fichier
     </div>
-    <input id="file-input" type="file" style="display:none" onchange="uploadFile(this.files[0])">
+    <input id="file-input" type="file" style="display:none">
 
     <div id="file-progress">
       <div id="file-prog-bar"><div id="file-prog-fill"></div></div>
@@ -273,7 +273,17 @@ async function connect(){
     setStatus('🔄 Rejoint la session…');
 
     const relayResp=await recvJson();
-    if(relayResp.type==='error'){setStatus('❌ '+relayResp.reason);ws.close();return;}
+    if(relayResp.type==='error'){
+      const reason=relayResp.reason||'Erreur inconnue';
+      const expired=reason.toLowerCase().includes('not found')||reason.toLowerCase().includes('session');
+      if(expired){
+        document.getElementById('session-id').value='';
+        setStatus('⚠️ Session expirée — entre le nouveau code affiché sur le PC');
+      } else {
+        setStatus('❌ '+reason);
+      }
+      ws.close(); return;
+    }
     // type === 'joined'
 
     // Auth
@@ -299,7 +309,7 @@ async function connect(){
 
     // Start session loop
     ws.onmessage=onMessage;
-    ws.onclose=()=>showConnect('🔌 Déconnecté');
+    ws.onclose=()=>showConnect('🔌 Déconnecté — entre le code affiché sur le PC pour reprendre');
     ws.onerror=()=>showConnect('❌ Erreur réseau');
 
     // FPS counter
@@ -678,6 +688,12 @@ function sendChatMsg(){
 document.addEventListener('DOMContentLoaded',()=>{
   const inp=document.getElementById('chat-input');
   if(inp)inp.addEventListener('keydown',e=>{if(e.key==='Enter')sendChatMsg();});
+
+  // File input : listener robuste pour Android
+  const fi=document.getElementById('file-input');
+  fi.addEventListener('change',function(){
+    if(this.files&&this.files[0])uploadFile(this.files[0]);
+  });
 });
 
 function appendChat(text, sender){
@@ -745,43 +761,63 @@ function fileDownload(name){
   showFileProgress(true, name, 0, 0);
 }
 
-function uploadFile(file){
-  if(!file||!ws||ws.readyState!==1)return;
+async function uploadFile(file){
+  if(!file||!ws||ws.readyState!==1){setUploadStatus('❌ Non connecté');return;}
   const tid=Date.now()&0xFFFFFFFF;
   fileUploadId=tid;
-  setUploadStatus('⏳ Lecture du fichier…');
+
+  // Reset input tout de suite → 2ème fichier possible immédiatement
+  document.getElementById('file-input').value='';
+
+  setUploadStatus('⏳ Lecture…');
   document.getElementById('file-progress').style.display='flex';
   document.getElementById('file-prog-fill').style.width='0%';
   document.getElementById('file-prog-lbl').textContent='0 / '+fmtSize(file.size);
 
-  const reader=new FileReader();
-  reader.onload=()=>{
-    const data=new Uint8Array(reader.result);
+  let data;
+  try{
+    data=new Uint8Array(await file.arrayBuffer());
+  }catch(e){
+    setUploadStatus('❌ Erreur lecture fichier');
+    fileUploadId=null; return;
+  }
+  if(fileUploadId!==tid)return;
+
+  try{
     ws.send(encodeJson(MSG_FILE_SEND_REQ,{id:tid,name:file.name,size:file.size}));
     setUploadStatus('⏳ Envoi de '+file.name+'…');
-    const CHUNK=65536;
+
+    const CHUNK=32768;
     let sent=0;
-    function sendNext(){
-      if(sent>=data.length){
-        ws.send(encodeJson(MSG_FILE_DONE,{id:tid,name:file.name}));
-        setUploadStatus('✅ '+file.name+' envoyé !');
-        document.getElementById('file-prog-fill').style.width='100%';
-        fileUploadId=null;
-        document.getElementById('file-input').value='';
-        return;
-      }
-      const chunk=data.slice(sent,sent+CHUNK);
-      ws.send(encodeFileChunk(tid,chunk));
-      sent+=chunk.length;
+    while(sent<data.length){
+      if(fileUploadId!==tid||!ws||ws.readyState!==1)
+        throw new Error('Connexion perdue');
+
+      // Backpressure : pause si le buffer est plein
+      while(ws.bufferedAmount>256*1024)
+        await new Promise(r=>setTimeout(r,50));
+
+      ws.send(encodeFileChunk(tid,data.slice(sent,sent+CHUNK)));
+      sent+=Math.min(CHUNK,data.length-sent);
+
       const pct=Math.round(sent*100/file.size);
       document.getElementById('file-prog-fill').style.width=pct+'%';
       document.getElementById('file-prog-lbl').textContent=
         fmtSize(sent)+' / '+fmtSize(file.size);
-      requestAnimationFrame(sendNext);
+
+      // Cède la main à l'event loop — 10ms pour ne pas saturer la connexion
+      await new Promise(r=>setTimeout(r,10));
     }
-    sendNext();
-  };
-  reader.readAsArrayBuffer(file);
+
+    ws.send(encodeJson(MSG_FILE_DONE,{id:tid,name:file.name}));
+    setUploadStatus('✅ '+file.name+' envoyé !');
+    document.getElementById('file-prog-fill').style.width='100%';
+
+  }catch(e){
+    setUploadStatus('❌ '+e.message);
+  }finally{
+    fileUploadId=null;
+  }
 }
 function setUploadStatus(txt){
   document.getElementById('file-prog-lbl').textContent=txt;
