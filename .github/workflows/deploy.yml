@@ -21,6 +21,9 @@ jobs:
             cd /root/ecrandistant
             git pull origin main
 
+            echo "🌐 Mise à jour du client web..."
+            cp /root/ecrandistant/webclient/index.html /var/www/ecrandistant/index.html
+
             echo "🔄 Redémarrage du service..."
             systemctl restart ecrandistant
 

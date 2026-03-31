@@ -64,7 +64,7 @@ async def _host_session(ws):
         await _send_json(ws, {'type': 'registered', 'session_id': session_id})
 
         # Wait for client with periodic heartbeats to keep Render's proxy alive
-        deadline = 600.0
+        deadline = 86400.0  # 24h — pas de timeout en production VPS
         elapsed  = 0.0
         while not client_joined.is_set():
             if elapsed >= deadline:

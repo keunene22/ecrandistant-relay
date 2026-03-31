@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir D:ecrandistantbore*)",
+      "Bash(ls D:ecrandistantbore*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git remote:*)",
+      "Bash(\"D:/ecrandistant/README.md\")"
+    ]
+  }
+}

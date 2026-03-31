@@ -1,0 +1,12 @@
+Étape 3 — Lancer le client dans la 2ème CMD
+
+cd /d D:\ecrandistant
+python main_client.py
+
+Étape 4 — Relancer le host dans la 1ère CMD
+
+python main_host.py
+
+Important : puisque tu testes sur le même ordi, dans le client mets l'IP 127.0.0.1 au lieu de 192.168.1.5 (c'est l'adresse locale de ta propre machine).
+
+

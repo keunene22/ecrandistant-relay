@@ -1,0 +1,2 @@
+cd /d D:\ecrandistant
+pip install -r requirements.txt
