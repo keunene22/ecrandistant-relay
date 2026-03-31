@@ -34,17 +34,20 @@ async def _send_json(ws, data: dict):
 
 # ── Bidirectional forwarder ────────────────────────────────────────────────────
 
-async def _forward(src_ws, dst_ws):
+async def _forward(src_ws, dst_ws, label='?'):
     """Forward BINARY messages only — TEXT messages are relay-internal control."""
     async for msg in src_ws:
         if msg.type == WSMsgType.BINARY:
             try:
                 await dst_ws.send_bytes(msg.data)
-            except Exception:
+            except Exception as e:
+                logger.warning('[Forward %s] send error: %s', label, e)
                 break  # destinataire déconnecté
         elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
+            logger.info('[Forward %s] src closed: %s', label, msg.type)
             break
         # TEXT (heartbeat_ack, keepalive…) → filtered, not forwarded
+    logger.info('[Forward %s] done', label)
 
 
 # ── Host handler ───────────────────────────────────────────────────────────────
@@ -84,8 +87,8 @@ async def _host_session(ws):
         logger.info('[%s] Relay started', session_id)
 
         # Launch both directions as concurrent tasks
-        t1 = asyncio.create_task(_forward(ws,        client_ws))  # host → client
-        t2 = asyncio.create_task(_forward(client_ws, ws))         # client → host
+        t1 = asyncio.create_task(_forward(ws,        client_ws, 'host→client'))
+        t2 = asyncio.create_task(_forward(client_ws, ws,        'client→host'))
 
         # Stop as soon as one side disconnects
         done, pending = await asyncio.wait(

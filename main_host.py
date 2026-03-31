@@ -218,7 +218,8 @@ class HostWorker(QThread):
                         on_chat_recv=lambda t, s: self.chat_received.emit(t),
                         chat_out_queue=self._chat_out,
                     )
-                    return  # session terminée normalement
+                    # Session terminée — reconnecter pour accepter un nouveau client
+                    self.log_message.emit('Session terminée — reconnexion au relay…')
 
             except Exception as e:
                 # Connexion perdue → reconnexion automatique dans 3s

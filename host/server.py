@@ -125,10 +125,7 @@ async def _send_frames(ws, capture: ScreenCapture, fps_ref: list):
         interval = 1.0 / fps
         t0 = loop.time()
         jpeg = await loop.run_in_executor(None, capture.capture)
-        try:
-            await ws.send(encode_frame(jpeg, capture.width, capture.height))
-        except Exception:
-            break  # connexion fermée — sortir proprement
+        await ws.send(encode_frame(jpeg, capture.width, capture.height))
         elapsed = loop.time() - t0
         await asyncio.sleep(max(0.0, interval - elapsed))
 
@@ -161,8 +158,10 @@ async def _sync_clipboard(ws, state: dict, enabled: asyncio.Event):
             if text and text != state['last_sent'] and text != state['last_received']:
                 state['last_sent'] = text
                 await ws.send(encode_json(MSG_CLIPBOARD, {'text': text}))
+        except websockets.exceptions.ConnectionClosed:
+            raise   # connexion fermée → laisser remonter pour annuler gather
         except Exception:
-            pass
+            pass    # erreur pyperclip ou autre → ignorer
 
 
 # ── Input receiving ────────────────────────────────────────────────────────────
@@ -400,7 +399,7 @@ async def run_host_session(
                 break
 
     # ── Run all coroutines concurrently ────────────────────────────────────
-    tasks = [
+    coros = [
         _send_frames(ws, capture, fps_ref),
         _recv_input(ws, handler, capture, fps_ref, audio_enabled,
                     clip_state, clip_enabled, file_transfers, _chat_cb),
@@ -408,14 +407,21 @@ async def run_host_session(
         _chat_sender(),
     ]
     if audio_cap and audio_cap.available:
-        tasks.append(_send_audio(ws, audio_cap, audio_enabled))
+        coros.append(_send_audio(ws, audio_cap, audio_enabled))
 
+    # Crée des Tasks explicites pour pouvoir les annuler proprement
+    task_list = [asyncio.create_task(c) for c in coros]
     try:
-        await asyncio.gather(*tasks)
+        await asyncio.gather(*task_list)
     except Exception:
-        pass  # connexion fermée ou erreur réseau — toujours géré proprement
+        pass  # connexion fermée ou erreur réseau
     finally:
-        # Close any open upload file handles
+        # Annuler toutes les tâches restantes (ex: _chat_sender bloqué sur q.get())
+        for t in task_list:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*task_list, return_exceptions=True)
+        # Fermer les handles de fichiers ouverts
         for ft in file_transfers.values():
             try:
                 ft['f'].close()
