@@ -38,7 +38,10 @@ async def _forward(src_ws, dst_ws):
     """Forward BINARY messages only — TEXT messages are relay-internal control."""
     async for msg in src_ws:
         if msg.type == WSMsgType.BINARY:
-            await dst_ws.send_bytes(msg.data)
+            try:
+                await dst_ws.send_bytes(msg.data)
+            except Exception:
+                break  # destinataire déconnecté
         elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
             break
         # TEXT (heartbeat_ack, keepalive…) → filtered, not forwarded

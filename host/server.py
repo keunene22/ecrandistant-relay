@@ -125,7 +125,10 @@ async def _send_frames(ws, capture: ScreenCapture, fps_ref: list):
         interval = 1.0 / fps
         t0 = loop.time()
         jpeg = await loop.run_in_executor(None, capture.capture)
-        await ws.send(encode_frame(jpeg, capture.width, capture.height))
+        try:
+            await ws.send(encode_frame(jpeg, capture.width, capture.height))
+        except Exception:
+            break  # connexion fermée — sortir proprement
         elapsed = loop.time() - t0
         await asyncio.sleep(max(0.0, interval - elapsed))
 
@@ -409,8 +412,8 @@ async def run_host_session(
 
     try:
         await asyncio.gather(*tasks)
-    except websockets.exceptions.ConnectionClosed:
-        pass
+    except Exception:
+        pass  # connexion fermée ou erreur réseau — toujours géré proprement
     finally:
         # Close any open upload file handles
         for ft in file_transfers.values():

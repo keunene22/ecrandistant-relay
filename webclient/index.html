@@ -203,6 +203,7 @@ const enc=new TextEncoder(), dec=new TextDecoder();
 let fileCurPath='', fileCurParent='';
 let fileDownloads={};   // tid → {name, size, parts:[Uint8Array]}
 let fileUploadId=null;
+let fileAckWaiters={};  // tid → {resolve, reject}
 
 // ── Protocol ──────────────────────────────────────────────────────────
 function encodeJson(type, payload){
@@ -411,9 +412,11 @@ function onMessage(e){
 
   // ── File: upload ack ─────────────────────────────────────────────────
   } else if(msg._mt===MSG_FILE_SEND_ACK){
-    if(!msg.ok){
-      setUploadStatus('❌ Refusé : '+msg.reason);
-      fileUploadId=null;
+    const w=fileAckWaiters[msg.id];
+    if(w){
+      delete fileAckWaiters[msg.id];
+      if(msg.ok) w.resolve();
+      else w.reject(new Error(msg.reason||'Fichier refusé par le PC'));
     }
 
   // ── File: directory listing ──────────────────────────────────────────
@@ -780,43 +783,52 @@ async function uploadFile(file){
   // Reset input tout de suite → 2ème fichier possible immédiatement
   document.getElementById('file-input').value='';
 
-  setUploadStatus('⏳ Lecture…');
   document.getElementById('file-progress').style.display='flex';
   document.getElementById('file-prog-fill').style.width='0%';
   document.getElementById('file-prog-lbl').textContent='0 / '+fmtSize(file.size);
 
-  let data;
   try{
-    data=new Uint8Array(await file.arrayBuffer());
-  }catch(e){
-    setUploadStatus('❌ Erreur lecture fichier');
-    fileUploadId=null; return;
-  }
-  if(fileUploadId!==tid)return;
-
-  try{
+    // 1. Demander l'autorisation au PC
+    setUploadStatus('⏳ Préparation…');
     ws.send(encodeJson(MSG_FILE_SEND_REQ,{id:tid,name:file.name,size:file.size}));
+
+    // Attendre l'ACK du PC avant d'envoyer quoi que ce soit
+    await new Promise((resolve,reject)=>{
+      fileAckWaiters[tid]={resolve,reject};
+      setTimeout(()=>{
+        if(fileAckWaiters[tid]){
+          delete fileAckWaiters[tid];
+          reject(new Error('Le PC ne répond pas (timeout ACK)'));
+        }
+      },8000);
+    });
+
     setUploadStatus('⏳ Envoi de '+file.name+'…');
 
+    // 2. Envoyer par morceaux — lecture à la volée (pas de chargement total en RAM)
     const CHUNK=32768;
     let sent=0;
-    while(sent<data.length){
+    while(sent<file.size){
       if(fileUploadId!==tid||!ws||ws.readyState!==1)
         throw new Error('Connexion perdue');
 
-      // Backpressure : pause si le buffer est plein
+      // Lire le prochain morceau depuis le fichier
+      const slice=file.slice(sent,sent+CHUNK);
+      const chunkData=new Uint8Array(await slice.arrayBuffer());
+
+      // Backpressure : pause si le buffer réseau est plein
       while(ws.bufferedAmount>256*1024)
         await new Promise(r=>setTimeout(r,50));
 
-      ws.send(encodeFileChunk(tid,data.slice(sent,sent+CHUNK)));
-      sent+=Math.min(CHUNK,data.length-sent);
+      ws.send(encodeFileChunk(tid,chunkData));
+      sent+=chunkData.length;
 
       const pct=Math.round(sent*100/file.size);
       document.getElementById('file-prog-fill').style.width=pct+'%';
       document.getElementById('file-prog-lbl').textContent=
         fmtSize(sent)+' / '+fmtSize(file.size);
 
-      // Cède la main à l'event loop — 10ms pour ne pas saturer la connexion
+      // Cède la main à l'event loop
       await new Promise(r=>setTimeout(r,10));
     }
 
@@ -825,7 +837,11 @@ async function uploadFile(file){
     document.getElementById('file-prog-fill').style.width='100%';
 
   }catch(e){
+    // Annuler le transfert côté PC si déjà démarré
+    if(ws&&ws.readyState===1)
+      ws.send(encodeJson(MSG_FILE_ABORT,{id:tid,reason:e.message}));
     setUploadStatus('❌ '+e.message);
+    delete fileAckWaiters[tid];
   }finally{
     fileUploadId=null;
   }
