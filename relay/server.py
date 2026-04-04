@@ -56,9 +56,10 @@ async def _forward(src_ws, dst_ws, label='?'):
 # ── Host handler ───────────────────────────────────────────────────────────────
 
 async def _host_session(ws, requested_sid: str = '', alias: str = ''):
-    # Si l'hôte demande un ID fixe et qu'il est libre, on l'utilise
-    if requested_sid and requested_sid not in _sessions:
+    if requested_sid:
         session_id = requested_sid.upper()
+        # Écraser l'ancienne session si elle existe (reconnexion hôte)
+        _sessions.pop(session_id, None)
     else:
         session_id = _new_session_id()
 

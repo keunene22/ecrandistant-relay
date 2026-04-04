@@ -178,15 +178,10 @@ def main():
             use_tls=p['use_tls'],
         )
     else:
-        # Résoudre l'alias → session_id réel si config.json défini
-        session_id = p['session_id']
-        if _CFG.get('session_id') and session_id == _CFG['session_id'].upper():
-            session_id = _resolve_alias(p['relay_url'], session_id)
-            logging.info('Session ID résolu: %s', session_id)
         worker = ConnectionWorker(
             password=p['password'],
             relay_url=p['relay_url'],
-            session_id=session_id,
+            session_id=p['session_id'],
         )
 
     window = ViewerWindow(worker)
