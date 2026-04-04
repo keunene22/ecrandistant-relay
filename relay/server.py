@@ -52,8 +52,12 @@ async def _forward(src_ws, dst_ws, label='?'):
 
 # ── Host handler ───────────────────────────────────────────────────────────────
 
-async def _host_session(ws):
-    session_id    = _new_session_id()
+async def _host_session(ws, requested_sid: str = ''):
+    # Si l'hôte demande un ID fixe et qu'il est libre, on l'utilise
+    if requested_sid and requested_sid not in _sessions:
+        session_id = requested_sid.upper()
+    else:
+        session_id = _new_session_id()
     client_holder = [None]
     client_joined = asyncio.Event()
     session_done  = asyncio.Event()
@@ -154,7 +158,7 @@ async def root_handler(request):
 
         role = msg.get('role')
         if role == 'host':
-            await _host_session(ws)
+            await _host_session(ws, msg.get('session_id', ''))
         elif role == 'client':
             await _client_session(ws, msg.get('session_id', ''))
         else:
