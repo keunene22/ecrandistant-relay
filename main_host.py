@@ -9,6 +9,9 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
+from shared.config_loader import load_config, is_home_mode
+_CFG = load_config()
+
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QFrame, QStackedWidget,
@@ -179,7 +182,12 @@ class HostWorker(QThread):
                     ping_interval=None,
                     open_timeout=30,
                 ) as ws:
-                    await ws.send(json.dumps({'role': 'host'}))
+                    reg_msg: dict = {'role': 'host'}
+                    if _CFG.get('session_id'):
+                        reg_msg['session_id'] = _CFG['session_id'].upper()
+                    if _CFG.get('session_id'):
+                        reg_msg['alias'] = _CFG['session_id'].upper()
+                    await ws.send(json.dumps(reg_msg))
                     # Attendre 'registered' en ignorant les heartbeats éventuels
                     while True:
                         resp = json.loads(await ws.recv())
@@ -355,7 +363,8 @@ class HostWindow(QWidget):
         self.setMinimumWidth(480)
         self.setStyleSheet(STYLE)
         self._worker: HostWorker | None = None
-        self._password = ''.join(random.choices(string.digits, k=6))
+        # Mot de passe : fixe depuis config.json, sinon généré aléatoirement
+        self._password = _CFG.get('password') or ''.join(random.choices(string.digits, k=6))
 
         self._stack = QStackedWidget()
         root = QVBoxLayout(self)
@@ -369,6 +378,10 @@ class HostWindow(QWidget):
         self._stack.addWidget(self._build_direct())  # 2
         self._stack.addWidget(self._build_waiting()) # 3
         self._stack.addWidget(self._build_session()) # 4
+
+        # Mode maison : démarrage automatique si config.json est complet
+        if is_home_mode(_CFG):
+            QTimer.singleShot(0, self._auto_start_relay)
 
     # ── Pages ──────────────────────────────────────────────────────────────────
 
@@ -530,6 +543,22 @@ class HostWindow(QWidget):
         self._dots_count = (self._dots_count + 1) % 4
         self._dots_lbl.setText('.' * (self._dots_count + 1))
 
+    def _auto_start_relay(self):
+        """Démarrage silencieux quand config.json est complet — aucun clic nécessaire."""
+        relay_url = _fix_relay_url(_CFG['relay_url'])
+        self._relay_edit.setText(relay_url)
+        self._stack.setCurrentIndex(3)   # page "en attente"
+        self._refresh_session_page()
+        self._worker = HostWorker(
+            mode='relay', password=self._password, relay_url=relay_url
+        )
+        self._worker.session_ready.connect(self._on_session_ready)
+        self._worker.client_joined.connect(self._on_client_joined)
+        self._worker.error_occurred.connect(self._on_error)
+        self._worker.log_message.connect(lambda m: logging.info(m))
+        self._worker.chat_received.connect(self._on_chat_received)
+        self._worker.start()
+
     def _start_relay(self):
         relay_url = _fix_relay_url(self._relay_edit.text())
         self._stack.setCurrentIndex(3)  # waiting page
@@ -608,6 +637,19 @@ class HostWindow(QWidget):
         self._status_lbl.setText('✅  Client connecté — session en cours')
         self._status_lbl.setObjectName('status_ok')
         self._status_lbl.setStyleSheet('color: #a6e3a1; font-size: 13px;')
+        self._stack.setCurrentIndex(4)   # page session
+        # Réduire et placer en bas à droite comme TeamViewer
+        self._collapse_to_corner()
+
+    def _collapse_to_corner(self):
+        """Réduit la fenêtre et la place en bas à droite de l'écran."""
+        screen = QApplication.primaryScreen().availableGeometry()
+        compact_w, compact_h = 320, 180
+        x = screen.right()  - compact_w - 12
+        y = screen.bottom() - compact_h - 12
+        self.resize(compact_w, compact_h)
+        self.move(x, y)
+        self.setWindowTitle('EcranDistant — Session active')
 
     def _on_error(self, msg: str):
         self._dots_timer.stop()
@@ -620,6 +662,11 @@ class HostWindow(QWidget):
             self._worker = None
         self._dots_timer.stop()
         self._stack.setCurrentIndex(0)
+        # Remettre la fenêtre en taille normale au centre
+        self.resize(500, 420)
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.move(screen.center().x() - 250, screen.center().y() - 210)
+        self.setWindowTitle('EcranDistant — HOST')
 
     def closeEvent(self, event):
         if self._worker:

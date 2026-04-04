@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 # session: {'host': ws, 'client_holder': [ws|None], 'client_joined': Event, 'done': Event}
 _sessions: dict = {}
 
+# alias → session_id courant (ex: 'BUREAU' → 'X4K2F1')
+_aliases: dict = {}
+
 
 def _new_session_id(length: int = 6) -> str:
     alphabet = string.ascii_uppercase + string.digits
@@ -52,12 +55,16 @@ async def _forward(src_ws, dst_ws, label='?'):
 
 # ── Host handler ───────────────────────────────────────────────────────────────
 
-async def _host_session(ws, requested_sid: str = ''):
+async def _host_session(ws, requested_sid: str = '', alias: str = ''):
     # Si l'hôte demande un ID fixe et qu'il est libre, on l'utilise
     if requested_sid and requested_sid not in _sessions:
         session_id = requested_sid.upper()
     else:
         session_id = _new_session_id()
+
+    # Enregistrer l'alias si fourni (ex: 'BUREAU' → session_id actuel)
+    if alias:
+        _aliases[alias.upper()] = session_id
     client_holder = [None]
     client_joined = asyncio.Event()
     session_done  = asyncio.Event()
@@ -108,6 +115,10 @@ async def _host_session(ws, requested_sid: str = ''):
     finally:
         session_done.set()
         _sessions.pop(session_id, None)
+        # Nettoyer l'alias quand la session se termine
+        for k, v in list(_aliases.items()):
+            if v == session_id:
+                _aliases.pop(k, None)
 
 
 # ── Client handler ────────────────────────────────────────────────────────────
@@ -158,7 +169,7 @@ async def root_handler(request):
 
         role = msg.get('role')
         if role == 'host':
-            await _host_session(ws, msg.get('session_id', ''))
+            await _host_session(ws, msg.get('session_id', ''), msg.get('alias', ''))
         elif role == 'client':
             await _client_session(ws, msg.get('session_id', ''))
         else:
@@ -168,6 +179,17 @@ async def root_handler(request):
 
     # Health check (GET / HEAD)
     return web.Response(text="EcranDistant Relay OK\n")
+
+
+async def alias_handler(request):
+    """GET /alias/BUREAU → retourne le session_id courant pour cet alias."""
+    alias = request.match_info.get('alias', '').upper()
+    if not alias:
+        return web.Response(status=400, text='Alias manquant')
+    sid = _aliases.get(alias)
+    if not sid:
+        return web.Response(status=404, text='Aucune session active pour cet alias')
+    return web.json_response({'session_id': sid, 'alias': alias})
 
 
 async def client_page_handler(request):
@@ -186,9 +208,11 @@ async def client_page_handler(request):
 
 async def start(host: str = '0.0.0.0', port: int = 9000):
     app = web.Application(client_max_size=20 * 1024 * 1024)  # 20 MB max message
-    app.router.add_route('*', '/',        root_handler)
-    app.router.add_route('*', '/health',  root_handler)
-    app.router.add_route('GET', '/client', client_page_handler)
+    app.router.add_route('*', '/',               root_handler)
+    app.router.add_route('*', '/relay',          root_handler)
+    app.router.add_route('*', '/health',         root_handler)
+    app.router.add_route('GET', '/client',       client_page_handler)
+    app.router.add_route('GET', '/alias/{alias}', alias_handler)
 
     runner = web.AppRunner(app)
     await runner.setup()

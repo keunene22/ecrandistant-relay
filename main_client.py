@@ -3,6 +3,9 @@ import sys
 import logging
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
+from shared.config_loader import load_config, is_home_mode
+_CFG = load_config()
+
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QComboBox,
@@ -75,6 +78,19 @@ class ConnectDialog(QDialog):
         root.addWidget(btn)
 
         self._pass_edit.returnPressed.connect(self._validate)
+
+        # Pré-remplissage depuis config.json
+        if _CFG.get('relay_url'):
+            self._relay_edit.setText(_CFG['relay_url'])
+        if _CFG.get('session_id'):
+            self._sid_edit.setText(_CFG['session_id'].upper())
+        if _CFG.get('password'):
+            self._pass_edit.setText(_CFG['password'])
+        if is_home_mode(_CFG):
+            # Passer directement en mode relay, le menu est déjà rempli
+            self._mode.setCurrentIndex(1)
+            self._on_mode(1)
+
         self.adjustSize()
 
     def _on_mode(self, index: int):
@@ -120,6 +136,27 @@ class ConnectDialog(QDialog):
         }
 
 
+def _resolve_alias(relay_url: str, alias: str) -> str:
+    """Résout un alias en session_id via HTTP GET /alias/<alias>.
+    Retourne le session_id ou l'alias lui-même en cas d'erreur."""
+    import urllib.request
+    import urllib.error
+    try:
+        http_base = relay_url.replace('wss://', 'https://').replace('ws://', 'http://')
+        http_base = http_base.rstrip('/')
+        # Supprimer /relay s'il est présent
+        if http_base.endswith('/relay'):
+            http_base = http_base[:-6]
+        url = f'{http_base}/alias/{alias.upper()}'
+        with urllib.request.urlopen(url, timeout=5) as r:
+            import json
+            data = json.loads(r.read())
+            return data.get('session_id', alias)
+    except Exception as e:
+        logging.warning('Alias lookup failed (%s), using as-is: %s', e, alias)
+        return alias
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName('EcranDistant')
@@ -141,10 +178,15 @@ def main():
             use_tls=p['use_tls'],
         )
     else:
+        # Résoudre l'alias → session_id réel si config.json défini
+        session_id = p['session_id']
+        if _CFG.get('session_id') and session_id == _CFG['session_id'].upper():
+            session_id = _resolve_alias(p['relay_url'], session_id)
+            logging.info('Session ID résolu: %s', session_id)
         worker = ConnectionWorker(
             password=p['password'],
             relay_url=p['relay_url'],
-            session_id=p['session_id'],
+            session_id=session_id,
         )
 
     window = ViewerWindow(worker)
