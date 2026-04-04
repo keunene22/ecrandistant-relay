@@ -19,10 +19,15 @@ jobs:
           script: |
             echo "📥 Récupération du code..."
             cd /root/ecrandistant
-            git pull origin main
+            git fetch origin main
+            git reset --hard origin/main
+
+            echo "🔍 Vérification nouveau code:"
+            grep -c "requested_sid" relay/server.py && echo "OK nouveau code" || echo "ERREUR ancien code"
 
             echo "🔄 Redémarrage du service..."
             systemctl restart ecrandistant
+            sleep 2
 
-            echo "✅ Déployé avec succès !"
-            systemctl status ecrandistant --no-pager | head -5
+            echo "✅ Statut:"
+            systemctl status ecrandistant --no-pager | head -8
